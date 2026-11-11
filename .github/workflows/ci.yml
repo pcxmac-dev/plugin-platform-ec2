@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  # the library release it is tested against (its plugin API): the release branch until a tag is pinned
+  LIMINAL_LIB_REF: release/0.2.0
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.12", "3.15"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install "liminal-libs @ git+https://github.com/pcxmac-dev/liminal-libs@${{ env.LIMINAL_LIB_REF }}"
+      - run: python -m pip install -e ".[dev]"
+      - run: python -m pytest -q

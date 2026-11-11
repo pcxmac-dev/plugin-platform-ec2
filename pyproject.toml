@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "plugin-platform-ec2"
+version = "0.1.0"  # the plugin's own release (CHANGELOG.md); the platform shows it on the plugin's page
+description = "Amazon EC2 for Liminal's platform: your instances, security groups, key pairs, volumes and Elastic IPs in each region and your Route 53 zones, the free changes alone (power, records, inbound rules, keys), and Dynamic DNS through Route 53."
+readme = "README.md"
+requires-python = ">=3.10"
+# the library it plugs into (the machine kind: liminal_libs.machines, plugin API 2.2; RestClient, Dynamic DNS's Keeper; the
+# Login interface: liminal_libs.apps)
+dependencies = ["liminal-libs>=1.49.0"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.entry-points."liminal.providers"]
+ec2 = "plugin_platform_ec2"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
