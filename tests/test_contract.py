@@ -22,7 +22,7 @@ def test_every_plugin_here_conforms_to_the_class_contract():
     assert found and all(p.api == "2.2" and not p.is_record for p in found)
     assert {p.SYSTEM for p in found} == {"platform"} and {p.KIND for p in found} == {"machine"}
     assert {(p.name, p.title, p.order, p.ICON) for p in found} == {("ec2", "Amazon EC2", 763, "ec2")}
-    assert module.__version__ == "0.1.0"
+    assert module.__version__ == "0.1.1"
 
 
 def test_its_settings_are_pairs_named_by_their_variables_and_never_aws_ones():

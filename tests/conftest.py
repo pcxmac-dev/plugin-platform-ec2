@@ -63,9 +63,10 @@ def tag_set(tags: dict) -> str:
 
 
 def instance(iid, name, state="running", itype="t3.micro", zone="us-east-1a", ip="54.194.252.215", ipv6="",
-             root="ebs", groups=(("sg-0web", "web"),), launched="2026-10-01T08:30:00.000Z", reason="") -> dict:
+             root="ebs", groups=(("sg-0web", "web"),), launched="2026-10-01T08:30:00.000Z", reason="",
+             platform="Linux/UNIX", asg="") -> dict:
     return {"id": iid, "name": name, "state": state, "type": itype, "zone": zone, "ip": ip, "ipv6": ipv6, "root": root,
-            "groups": list(groups), "launched": launched, "reason": reason}
+            "groups": list(groups), "launched": launched, "reason": reason, "platform": platform, "asg": asg}
 
 
 def default_account() -> dict:
@@ -134,6 +135,7 @@ class FakeAws:
             PRIVATE: [{"name": "corp.internal", "type": "SOA", "ttl": 900, "values": ["ns-1.awsdns-00.com. x 1 7200 900 1209600 86400"]},
                       {"name": "db.corp.internal", "type": "A", "ttl": 300, "values": ["10.0.0.5"]}],
         }
+        self.throttle = 0  # ListHostedZones answered with Route 53's Throttling this many times first
         self.change_ids = (f"C{n:012d}" for n in itertools.count(1))
         self.changes: dict[str, str] = {}
         self.ids = (f"{n:017x}" for n in itertools.count(0xabc))
@@ -252,8 +254,9 @@ class FakeAws:
                 "<tenancy>default</tenancy></placement>" + (f"<ipAddress>{i['ip']}</ipAddress>" if i["ip"] else "") +
                 "<privateIpAddress>10.0.0.9</privateIpAddress>" +
                 items("groupSet", (f"<groupId>{g}</groupId><groupName>{n}</groupName>" for g, n in i["groups"])) +
-                f"<rootDeviceType>{i['root']}</rootDeviceType><platformDetails>Linux/UNIX</platformDetails>" +
-                (tag_set({"Name": i["name"]}) if i["name"] else "<tagSet/>") + nic)
+                f"<rootDeviceType>{i['root']}</rootDeviceType><platformDetails>{i['platform']}</platformDetails>" +
+                tag_set({**({"Name": i["name"]} if i["name"] else {}),
+                         **({"aws:autoscaling:groupName": i["asg"]} if i["asg"] else {})}) + nic)
 
     def do_DescribeInstances(self, region, acct, params):
         found = acct["instances"]
@@ -430,6 +433,9 @@ class FakeAws:
         raise AssertionError(f"the fake has no {record['method']} {path}")
 
     def list_zones(self, query):
+        if self.throttle:  # Route 53's own "slow down": an HTTP 400 Throttling, as many times as set
+            self.throttle -= 1
+            return 400, {}, r53_error("Throttling", "Rate exceeded")
         if "ListHostedZones" in self.fail:
             status, code, message = self.fail["ListHostedZones"]
             return status, {}, r53_error(code, message)
@@ -541,9 +547,9 @@ def settings_of(api: bool = True, ddns: bool = False, **more) -> dict[str, str]:
 
 
 @pytest.fixture(autouse=True)
-def _no_aws_no_network(monkeypatch):
+def _no_aws_no_network(monkeypatch, tmp_path):
     """No test reaches AWS, a resolver or this machine's settings: the HTTPS and DNS are refused, every EC2_ variable
-    cleared (and AWS_ ones set, which the plugin must never read)."""
+    cleared (and AWS_ ones set, which the plugin must never read), the platform's folder the test's own."""
     def refused(*a, **k):
         raise AssertionError("a test reached for the network")
     monkeypatch.setattr(aws_mod, "https", refused)
@@ -553,6 +559,7 @@ def _no_aws_no_network(monkeypatch):
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIAOTHERTOOLSKEY001")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "another-tools-secret-0123456789")
     monkeypatch.setenv("AWS_REGION", "ap-south-1")
+    monkeypatch.setenv("LIMINAL_PLATFORM_DIR", str(tmp_path / "platform"))
 
 
 @pytest.fixture
@@ -564,11 +571,29 @@ def env(monkeypatch):
     return put
 
 
+class Public:
+    """This network's public address as DNS would tell it (a stand-in; `address` changed by a test)."""
+
+    def __init__(self, address: str | None = HOME, whose: str = "OpenDNS"):
+        self.address, self.whose, self.asked = address, whose, 0
+
+    def __call__(self):
+        self.asked += 1
+        return self.address, (self.whose if self.address else "neither OpenDNS nor Google answered")
+
+
+class PlatformApp:
+    """The platform app as a plugin sees it attaching it (its NAME): only it starts the reading in the background."""
+
+    NAME = "platform"
+
+
 @pytest.fixture
-def made():
-    """A plugin over the stand-ins: (plugin, fake AWS)."""
-    def make(fake: FakeAws | None = None, public=(HOME, "OpenDNS")):
+def made(tmp_path):
+    """A plugin over the stand-ins: (plugin, fake AWS); its folder (Dynamic DNS's ddns.json) the test's own."""
+    def make(fake: FakeAws | None = None, public=(HOME, "OpenDNS"), folder=None):
         fake = fake or FakeAws()
-        p = Ec2Plugin(transport=fake, public=(lambda: public), sleep=lambda s: None)
+        ask = public if callable(public) else (lambda: public)
+        p = Ec2Plugin(transport=fake, public=ask, sleep=lambda s: None, folder=folder or tmp_path / "ec2")
         return p, fake
     return make

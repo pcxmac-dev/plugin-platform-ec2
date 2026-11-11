@@ -200,9 +200,10 @@ EC2_API = Api(
         _call("DescribeImages", "AMIs (Owner self: the account's own)", "AMIs", used="the AMIs counted per region"),
         _call("StartInstances", ("starts stopped EBS-backed instances: starts the compute charge again (by the second, a "
                                  "minute at least each start)"), "Instances",
-              used="Power… > Start (its confirmation says the compute charge resumes)", writes=True, costs=True),
+              used="Power… > Start, asked twice (its compute charge resumes)", writes=True, costs=True),
         _call("StopInstances", "stops EBS-backed instances (Force: without the file systems flushed)", "Instances",
-              used="Power… > Stop; Force stop only when asked twice", writes=True),
+              used=("Power… > Stop; Force stop, or a stop erasing an instance store, asked twice; never an Auto Scaling "
+                    "group's instance (the group would replace it)"), writes=True),
         _call("RebootInstances", "reboots instances (a hard reboot if the OS does not shut down)", "Instances",
               used="Power… > Reboot", writes=True),
         _call("AuthorizeSecurityGroupIngress", "adds inbound rules", "Security groups",
@@ -260,7 +261,8 @@ ROUTE53_API = Api(
           "policy allows route53:ListHostedZones, ListResourceRecordSets, GetChange and ChangeResourceRecordSets"),
     limits=("per account: 50 requests at once, refilled 10 a second, across every action (and each action's own bucket); "
             "record changes 1,500 at once and 100 a second (an UPSERT counts 2); Throttling (HTTP 400) beyond; a zone takes "
-            "one change at a time (PriorRequestNotComplete); a change batch at most 1,000 records and 32,000 characters"),
+            "one change at a time (PriorRequestNotComplete); a change batch at most 1,000 records and 32,000 characters. "
+            "The plugin spaces its requests (0.15 s) and waits a throttle out"),
     costs=("$0.50 a hosted zone a month for the first 25 ($0.10 after), $0.40 per million standard queries; the pricing "
            "page names no charge for the API's requests. Making a hosted zone or a health check starts a charge (never "
            "done here); records cost nothing to set"),

@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.1.1 (2026-11-11)
+
+What the audit of the six cloud plugins found before any key went in (session 87405e6a, "the cloud plugins and today's
+platform code: an audit before 8780's restart"; eight reviewers, a skeptic per finding), fixed. Needs liminal-libs>=1.49.2.
+
+- **Dynamic DNS changes only what is its own** (liminal-libs 1.49.2's Keeper): a host with no A record is made, one
+  already pointing here or at the address it set last kept current, one holding another address, or several, left as it
+  is with a **Take over…** on the page (`ddns_take_over(host, holds)`, confirmed; refused when the record changed since);
+  never cut to one address unasked; the address asked again just before a write. What is its own is kept in the
+  platform's folder's `ec2/ddns.json`, so it is known after a restart; a host taken out of EC2_DDNS_HOSTS is let go.
+  Before, a pass replaced a host's whole A record set with this network's address, whatever it held.
+- **Update DNS now is confirmed** (its form, `ddns-now`), no longer a write on one click.
+- **A start is asked twice** (`accept_costs`): it resumes the instance's compute charge, which its words say.
+- **An Auto Scaling group's instance is never stopped here**: stopped, the group ends it and launches another, which
+  bills, while the dialog said its charge stopped. Its Power… offers no stop, and a stop asked anyway is refused, naming
+  the group (its `aws:autoscaling:groupName` tag) and saying to change the group instead.
+- **A second confirmation counts only when it is exactly true** (`accept_costs`, `accept_data_loss`, `accept_open`,
+  `accept_lockout`): "false", "yes" or 1 from a local program is refused like a missing one.
+- **The background reading starts only when the platform attaches the plugin**: the charts app run alone attaches every
+  plugin it finds, and now starts nothing of this one.
+- **A pass ends once the plugin is detached**: a refresh stops before its next request and keeps nothing; a Dynamic DNS
+  pass writes nothing after the detach; the worker reads no setting again (never the process's environment).
+- The revoke's lockout check reads the region's rules afresh (it used those of the last read), and covers RDP to a
+  Windows instance as well as SSH to the rest.
+- Route 53's throttling (HTTP 400 Throttling, PriorRequestNotComplete) is waited out and asked again, and its requests are
+  spaced 0.15 s apart so twenty zones' reads never go out in a burst; its XML change is sent with the library's `data=`
+  (no more of the plugin's own way round RestClient).
+- A private key pasted into "Import a public key…" was written to the platform's log by the platform's logging of every
+  change with its arguments: liminal-platform 0.20.1 logs a change without its values; the plugin still refuses the key
+  without saying it back.
+
 ## 0.1.0 (2026-11-11)
 
 The first release (the user: "lets roll plugins for EC2, vultr, azure and google cloud"; "Free changes only"; "each plugin

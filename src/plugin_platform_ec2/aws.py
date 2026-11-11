@@ -4,12 +4,11 @@ read with xml.etree by local names whatever the namespace; their errors (EC2: <R
 <InvalidChangeBatch><Messages><Message>) worded for the user with what to do, the keys scrubbed; and the client: the
 library's RestClient with the plugin's SigV4 signer as its `auth=`, its error reader as `error=`.
 
-The library's RestClient sends a JSON body or a form; Route 53's change is an XML document. `AwsClient.post_xml` hands the
-document to the client's signer and transport for that one request (a thread's own, so the background reading and a page's
-change never mix), every other part of the request the client's: its retries, its words, what it counts (facts)."""
+Route 53's change is an XML document, sent as it is (RestClient's `data=`, liminal-libs 1.49.1) and signed with it; Route
+53's own "slow down" (HTTP 400, Throttling or PriorRequestNotComplete: nothing was done) is waited out like a 429
+(`throttled=`, `route53_throttled`), EC2's (RequestLimitExceeded, a 503) tried again for a read by the client itself."""
 from __future__ import annotations
 
-import threading
 import xml.etree.ElementTree as ET
 from collections.abc import Callable, Iterable, Mapping
 
@@ -150,28 +149,17 @@ class AwsClient(RestClient):
     """A RestClient for AWS: signed with `signer`, AWS's errors read, XML asked for; `post_xml` sends an XML document."""
 
     def __init__(self, base: str, *, signer: Signer, transport: Callable | None = None, secrets: Iterable[str] = (),
-                 **options):
-        self._raw = threading.local()
-        send = transport or https
+                 throttled: Callable[[Answer], bool] | None = None, **options):
         self.signer = signer
-
-        def raw_or(body):
-            held = getattr(self._raw, "body", None)
-            return held if held is not None else body
-
-        def signed(method, url, headers, body):
-            return signer(method, url, headers, raw_or(body))
-
-        def sent(method, url, headers, body, timeout):
-            return send(method, url, headers, raw_or(body), timeout)
-
-        super().__init__(base, auth=signed, transport=sent, secrets=secrets, error=error_words,
-                         headers={"Accept": "application/xml, text/xml", "User-Agent": AGENT}, **options)
+        super().__init__(base, auth=signer, transport=transport or https, secrets=secrets, error=error_words,
+                         throttled=throttled, headers={"Accept": "application/xml, text/xml", "User-Agent": AGENT}, **options)
 
     def post_xml(self, url: str, document: bytes, ok: Iterable[int] = (200,)) -> Answer:
-        """`document` sent by POST (Content-Type text/xml, signed with it)."""
-        self._raw.body = document
-        try:
-            return self.request("POST", url, headers={"Content-Type": "text/xml; charset=utf-8"}, ok=ok)
-        finally:
-            self._raw.body = None
+        """`document` sent by POST as it is (Content-Type text/xml), signed with it."""
+        return self.request("POST", url, headers={"Content-Type": "text/xml; charset=utf-8"}, ok=ok, data=document)
+
+
+def route53_throttled(answer: Answer) -> bool:
+    """Whether Route 53 asked to slow down (its HTTP 400 Throttling, or PriorRequestNotComplete: the zone's last change
+    still being applied); neither was done, so it is asked again after a wait."""
+    return error_words(answer)[1] in ("Throttling", "PriorRequestNotComplete")

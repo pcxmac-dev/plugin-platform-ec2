@@ -10,7 +10,7 @@ import time
 import pytest
 
 import plugin_platform_ec2.__main__ as cli
-from conftest import ACCOUNT, KEY_ID, SECRET, TOKEN, FakeAws, Pairs, settings_of
+from conftest import ACCOUNT, KEY_ID, SECRET, TOKEN, FakeAws, Pairs, PlatformApp, settings_of
 from plugin_platform_ec2 import NOT_SET, PUBLIC_IPV4, RETRY_S
 from plugin_platform_ec2.aws import AwsError
 from plugin_platform_ec2.settings import read
@@ -61,12 +61,12 @@ def test_the_settings_are_read_through_the_login_by_their_pairs():
     assert read(Down({})).problems == ("the settings could not be read from the login: ConnectionError",)
 
 
-def test_attached_it_asks_the_apps_login_and_reads_in_the_background_until_detached(made):
+def test_attached_by_the_platform_it_asks_its_login_and_reads_in_the_background_until_detached(made):
     p, fake = made()
     login = Pairs(settings_of())
-    p.attach(object(), login)
+    p.attach(PlatformApp(), login)
     try:
-        assert p.working and wait_until(lambda: p.status().get("readAt"))
+        assert p.working and p.reading and wait_until(lambda: p.status().get("readAt"))
         assert "ec2-access-key-id" in login.asked and "DescribeInstances" in fake.actions()
     finally:
         p.detach()
@@ -74,6 +74,51 @@ def test_attached_it_asks_the_apps_login_and_reads_in_the_background_until_detac
     calls = len(fake.requests)
     time.sleep(0.1)
     assert len(fake.requests) == calls  # detached: nothing of it runs
+
+
+def test_attached_by_another_app_it_starts_nothing(made, env):
+    """The charts app run alone attaches every plugin it finds: this one's reading starts only under the platform."""
+    env(settings_of(ddns=True))
+    p, fake = made()
+
+    class ChartsApp:
+        NAME = "charts"
+
+    for app in (ChartsApp(), object()):
+        p.attach(app, Pairs(settings_of(ddns=True)))
+        try:
+            time.sleep(0.1)
+            assert not p.working and not p.reading and fake.requests == []
+            assert p.status()["summary"].startswith("the account is read once attached")
+        finally:
+            p.detach()
+
+
+def test_a_worker_whose_plugin_was_detached_reads_no_setting_and_ends(made, monkeypatch):
+    """Its stop event set (the detach), the worker's loop ends before it asks any login, the process's environment
+    above all."""
+    import threading
+
+    import plugin_platform_ec2.settings as settings_mod
+
+    p, fake = made()
+    asked = []
+    monkeypatch.setattr(settings_mod, "read", lambda login=None: asked.append(login))
+    stop = threading.Event()
+    stop.set()
+    p._work(stop)
+    assert asked == [] and fake.requests == []
+    p.attach(PlatformApp(), None)  # attached with no login (the platform's own missing): nothing read of the environment
+    try:
+        live = threading.Event()
+        p._rt.wake.set()
+        runner = threading.Thread(target=p._work, args=(live,), daemon=True)
+        object.__setattr__(p, "login", None)
+        runner.start()
+        runner.join(timeout=2)
+        assert not runner.is_alive() and asked == []
+    finally:
+        p.detach()
 
 
 def test_a_refresh_draws_the_tables_and_the_status_asks_nothing_and_holds_no_value(made, env):

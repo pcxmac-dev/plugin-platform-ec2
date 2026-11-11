@@ -31,6 +31,7 @@ WRITES = ("StartInstances", "StopInstances", "RebootInstances", "AuthorizeSecuri
 PROTOCOLS = {"tcp": "TCP", "udp": "UDP", "icmp": "ICMP", "icmpv6": "ICMPv6", "-1": "every protocol"}
 KEY_LINE = re.compile(r"^(ssh-ed25519|ssh-rsa)\s+([A-Za-z0-9+/]+={0,3})(?:\s+(.*))?$")
 KEY_NAME = re.compile(r"^[ -~]{1,255}$")  # AWS: up to 255 ASCII characters
+ASG_TAG = "aws:autoscaling:groupName"  # the Auto Scaling group an instance belongs to (EKS managed nodes' too)
 
 
 def endpoint(region: str) -> str:
@@ -228,13 +229,15 @@ def instance_of(item, region: str) -> dict:
         for nic in items(item, "networkInterfaceSet"):
             for a in items(nic, "ipv6AddressesSet"):
                 ipv6 = ipv6 or text(a, "ipv6Address")
-    return {"id": text(item, "instanceId"), "name": tags_of(item).get("Name", ""), "state": text(item, "instanceState/name"),
+    tags = tags_of(item)
+    return {"id": text(item, "instanceId"), "name": tags.get("Name", ""), "state": text(item, "instanceState/name"),
             "type": text(item, "instanceType"), "zone": text(item, "placement/availabilityZone"), "region": region,
             "publicIp": text(item, "ipAddress"), "ipv6": ipv6, "privateIp": text(item, "privateIpAddress"),
             "launched": text(item, "launchTime"), "root": text(item, "rootDeviceType"), "key": text(item, "keyName"),
             "platform": text(item, "platformDetails") or text(item, "platform"), "lifecycle": text(item, "instanceLifecycle"),
             "groups": [(text(g, "groupId"), text(g, "groupName")) for g in items(item, "groupSet")],
-            "reason": text(item, "stateReason/message") or text(item, "reason"), "vpc": text(item, "vpcId")}
+            "reason": text(item, "stateReason/message") or text(item, "reason"), "vpc": text(item, "vpcId"),
+            "asg": tags.get(ASG_TAG, "")}
 
 
 def type_of(item) -> dict:

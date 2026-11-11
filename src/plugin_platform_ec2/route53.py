@@ -4,11 +4,16 @@ the one change: ChangeResourceRecordSets, with an UPSERT (a record set made, or 
 given exactly as it is, as Route 53 asks), one record set a change, so every other record of the zone is untouched.
 
 A record set is a name and a type with its TTL and values; one with an alias target, a routing policy (a SetIdentifier) or
-a traffic policy is read and shown but never written here (WRITABLE says which simple sets are)."""
+a traffic policy is read and shown but never written here (WRITABLE says which simple sets are).
+
+Its requests are spaced (SPACING_S apart: Route 53 refills 10 a second for the whole account), so reading twenty zones
+never goes out as a burst; a throttle is waited out by the client (aws.route53_throttled)."""
 from __future__ import annotations
 
 import ipaddress
 import re
+import threading
+import time
 import xml.etree.ElementTree as ET
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -26,6 +31,7 @@ ZONES_PAGE = 100  # ListHostedZones' most a response
 RECORDS_PAGE = 300  # ListResourceRecordSets' most a response
 RECORD_PAGES = 10  # a zone's records read up to 3,000
 TTL_DEFAULT = 300
+SPACING_S = 0.15  # the least time between two of its requests (under Route 53's 10 a second)
 TTL_MOST = 2147483647
 WRITABLE = ("A", "AAAA", "CNAME", "TXT", "MX", "NS", "CAA", "SRV")
 TEXT_CHUNK = 255  # a TXT value's strings are at most 255 characters each
@@ -200,11 +206,24 @@ def ttl_of(value) -> int:
 class Route53Api:
     """Route 53 through one client (route53.amazonaws.com)."""
 
-    def __init__(self, client: AwsClient):
+    def __init__(self, client: AwsClient, sleep=time.sleep, spacing: float = SPACING_S):
         self.client = client
+        self._sleep = sleep
+        self._spacing = max(0.0, float(spacing))
+        self._lock = threading.Lock()
+        self._last = 0.0
+
+    def _paced(self) -> None:
+        """Waits until SPACING_S has passed since its last request (the requests of every thread spaced alike)."""
+        with self._lock:
+            wait = self._last + self._spacing - time.monotonic()
+            if wait > 0:
+                self._sleep(wait)
+            self._last = time.monotonic()
 
     def _get(self, action: str, path: str, params: dict | None = None):
         url = f"{BASE}{path}" + (("?" + query(params)) if params else "")
+        self._paced()
         try:
             return parse(self.client.request("GET", url).body)
         except RestError as e:
@@ -255,6 +274,7 @@ class Route53Api:
         """ChangeResourceRecordSets: each (UPSERT | DELETE, a simple record set) applied at once, or none."""
         document = change_document(changes, comment)
         url = f"{BASE}/hostedzone/{zone_id(zone)}/rrset/"
+        self._paced()
         try:
             answer = self.client.post_xml(url, document)
         except RestError as e:

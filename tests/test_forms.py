@@ -13,7 +13,7 @@ import xml.etree.ElementTree as ET
 import pytest
 
 from conftest import ED25519, NS_R53, PRIVATE, ZONE, FakeAws, instance, settings_of
-from plugin_platform_ec2 import ACCEPT_LOCKOUT, ACCEPT_OPEN, ACCEPT_POWER, Refusal
+from plugin_platform_ec2 import ACCEPT_COSTS, ACCEPT_LOCKOUT, ACCEPT_OPEN, ACCEPT_POWER, Refusal
 
 BASE = {"Version": "2016-11-15"}
 
@@ -69,7 +69,7 @@ def test_every_form_asks_a_hook_with_its_arguments_in_order(ready):
         assert all(x["type"] in ("text", "number", "choice", "fixed", "accept") for x in f["fields"])
         for x in f["fields"]:
             if x["type"] == "accept":
-                assert x["name"] in (ACCEPT_POWER, ACCEPT_OPEN, ACCEPT_LOCKOUT) and x["yes"] and x["words"]
+                assert x["name"] in (ACCEPT_POWER, ACCEPT_OPEN, ACCEPT_LOCKOUT, ACCEPT_COSTS) and x["yes"] and x["words"]
     # what each instance's Power… offers follows its state; an instance store-backed one is only rebooted
     actions = {i: [c["value"] for c in next(x for x in forms[f"power:us-east-1:{i}"]["fields"] if x["name"] == "action")["choices"]]
                for i in ("i-0web0000000000001", "i-0db00000000000002", "i-0eph0000000000003")}
@@ -79,8 +79,9 @@ def test_every_form_asks_a_hook_with_its_arguments_in_order(ready):
     start = forms["power:us-east-1:i-0db00000000000002"]
     assert start["confirm"]["words"] == ("{action} db in us-east-1: once it runs, its compute charge resumes (by the second, "
                                          "a minute at least each start), beside the charges that never stopped: its EBS "
-                                         "volumes and Elastic IPs.")
-    assert start["confirm"].get("danger") is False  # asked once: no second confirmation for a start
+                                         "volumes and Elastic IPs (you are asked again first).")
+    costs = next(x for x in start["fields"] if x["name"] == ACCEPT_COSTS)  # the second confirmation of a start
+    assert costs["type"] == "accept" and "its compute charge resumes" in costs["words"] and costs["yes"] == "Start it"
     stop = forms["power:us-east-1:i-0web0000000000001"]["confirm"]["words"]  # web runs: a stop's words
     assert "stopped, an EBS-backed instance stops its compute charge; its EBS volumes and Elastic IPs still bill" in stop
     assert "resumes" not in stop and "instance store" not in stop  # t3.micro has none
@@ -104,7 +105,11 @@ def test_power_sends_start_stop_and_reboot_and_asks_twice_before_a_stop_that_los
     assert sent(fake, "StopInstances") == {"InstanceId.1": "i-0web0000000000001"}  # graceful: no Force
     assert rep["now"] == "stopping" and "its EBS volumes (8 GiB) still bill per GB-month" in rep["lines"][0]
     db = forms["power:us-east-1:i-0db00000000000002"]
-    rep = ask(p, db, {"action": "start"})
+    calls = len(fake.requests)
+    with pytest.raises(Refusal, match=r"Starting db \(i-0db00000000000002\) resumes its compute charge") as refused:
+        ask(p, db, {"action": "start"})  # the start, which bills, is asked twice
+    assert refused.value.accept == ACCEPT_COSTS and "StartInstances" not in fake.actions()[calls:]
+    rep = ask(p, db, {"action": "start"}, accepted={ACCEPT_COSTS})
     assert sent(fake, "StartInstances") == {"InstanceId.1": "i-0db00000000000002"} and rep["now"] == "pending"
     assert "a minute at least" in rep["lines"][0]
     # db (m5d.large) has an instance store: its stop is refused until accepted, nothing sent first
@@ -186,8 +191,9 @@ def test_a_rule_is_revoked_by_its_id_and_the_last_one_letting_ssh_in_asked_twice
     rep = ask(p, form, https_rule["values"])
     assert sent(fake, "RevokeSecurityGroupIngress") == {"GroupId": "sg-0web", "SecurityGroupRuleId.1": "sgr-0http000000000002"}
     assert rep["said"] == "revoked TCP 443 from 0.0.0.0/0 from sg-0web"
-    fresh = fake.last("DescribeSecurityGroupRules")
-    assert fresh["method"] == "GET" and fresh["params"]["SecurityGroupRuleId.1"] == "sgr-0http000000000002"  # read afresh
+    reads = [r for r in fake.requests if r["action"] == "DescribeSecurityGroupRules"][-2:]  # the rule, then the region's
+    assert reads[0]["params"]["SecurityGroupRuleId.1"] == "sgr-0http000000000002"
+    assert "SecurityGroupRuleId.1" not in reads[1]["params"] and all(r["method"] == "GET" for r in reads)  # read afresh
     # sgr-0ssh… is the only rule letting SSH in to web and the instance store-backed one: asked twice
     ssh = {"group": "us-east-1/sg-0web", "rule": "sgr-0ssh0000000000001"}
     calls = len(fake.requests)
@@ -349,3 +355,83 @@ def test_a_value_typed_as_it_was_set_is_found_to_remove(ready):
     assert rep["after"] == ['"v=spf1 include:_spf.protonmail.ch ~all"', '"protonmail-verification=0123456789abcdef"']
     rep = p.remove_record(ZONE, "www", "CNAME", "EXAMPLE.net.")  # a host name in any case, its dot or not
     assert change_of(fake) == [("DELETE", "www.example.com.", "CNAME", "300", ["example.net"])]
+
+
+def test_an_auto_scaling_groups_instance_is_never_stopped_here(made, env):
+    """Stopped, an Auto Scaling group's instance fails the group's health check: the group ends it and launches another,
+    which bills. Its Power… offers no stop, and a stop asked anyway is refused, naming the group (its
+    aws:autoscaling:groupName tag), nothing sent."""
+    env(settings_of(EC2_REGIONS="us-east-1"))
+    fake = FakeAws()
+    fake.account["us-east-1"]["instances"].append(instance("i-0node000000000005", "node", asg="eks-workers-1a2b"))
+    p, fake = made(fake)
+    p.refresh()
+    form = forms_of(p)["power:us-east-1:i-0node000000000005"]
+    assert [c["value"] for c in next(x for x in form["fields"] if x["name"] == "action")["choices"]] == ["reboot"]
+    assert "Auto Scaling group eks-workers-1a2b" in form["note"] and "change the group instead" in form["note"]
+    for action in ("stop", "force-stop"):
+        with pytest.raises(Refusal, match="belongs to the Auto Scaling group eks-workers-1a2b") as refused:
+            p.power("us-east-1", "i-0node000000000005", action, accept_data_loss=True)
+        assert refused.value.accept is None and "change the group instead" in str(refused.value)
+    assert "StopInstances" not in fake.actions()
+    p.power("us-east-1", "i-0node000000000005", "reboot")  # a reboot keeps it: allowed
+    assert sent(fake, "RebootInstances") == {"InstanceId.1": "i-0node000000000005"}
+
+
+def test_a_second_confirmation_counts_only_when_exactly_true(ready):
+    """The page sends JSON true; "false", "yes" or 1 from a local program is refused like a missing accept."""
+    p, fake = ready
+    fake.account["us-east-1"]["instances"][1]["state"] = "running"
+    for value in ("false", "yes", 1, "true", [True]):
+        calls = len(fake.requests)
+        with pytest.raises(Refusal) as refused:
+            p.power("us-east-1", "i-0db00000000000002", "stop", accept_data_loss=value)
+        assert refused.value.accept == ACCEPT_POWER
+        with pytest.raises(Refusal):
+            p.authorize_ingress("us-east-1/sg-0web", "tcp", "22", "0.0.0.0/0", None, value)
+        with pytest.raises(Refusal):
+            p.revoke_ingress("us-east-1/sg-0db", "sgr-0dbssh00000000004", value)
+        assert not {"StopInstances", "AuthorizeSecurityGroupIngress", "RevokeSecurityGroupIngress"} & set(fake.actions()[calls:])
+    fake.account["us-east-1"]["instances"][1]["state"] = "stopped"
+    with pytest.raises(Refusal) as refused:
+        p.power("us-east-1", "i-0db00000000000002", "start", accept_costs="yes")
+    assert refused.value.accept == ACCEPT_COSTS and "StartInstances" not in fake.actions()
+    p.power("us-east-1", "i-0db00000000000002", "start", accept_costs=True)  # exactly True
+    assert sent(fake, "StartInstances") == {"InstanceId.1": "i-0db00000000000002"}
+
+
+def test_the_last_rule_letting_rdp_in_to_a_windows_instance_is_asked_twice_over_fresh_rules(made, env):
+    env(settings_of(EC2_REGIONS="us-east-1"))
+    fake = FakeAws()
+    acct = fake.account["us-east-1"]
+    acct["groups"].append({"id": "sg-0win", "name": "win", "about": "windows", "vpc": "vpc-1"})
+    acct["instances"].append(instance("i-0win0000000000006", "desk", platform="Windows", groups=(("sg-0win", "win"),)))
+    acct["rules"].append({"id": "sgr-0rdp0000000000007", "group": "sg-0win", "egress": False, "protocol": "tcp", "from": 3389,
+                          "to": 3389, "cidr4": "203.0.113.7/32", "description": "rdp"})
+    p, fake = made(fake)
+    p.refresh()
+    with pytest.raises(Refusal, match=r"last rule letting RDP in to desk \(i-0win0000000000006\)") as refused:
+        p.revoke_ingress("us-east-1/sg-0win", "sgr-0rdp0000000000007")
+    assert refused.value.accept == ACCEPT_LOCKOUT
+    # a rule made since the last read (not in the cached rules) lets RDP in too: the fresh read finds it, no second question
+    acct["rules"].append({"id": "sgr-0rdp0000000000008", "group": "sg-0win", "egress": False, "protocol": "tcp", "from": 3389,
+                          "to": 3389, "cidr4": "198.51.100.0/24", "description": ""})
+    p.revoke_ingress("us-east-1/sg-0win", "sgr-0rdp0000000000007")
+    assert sent(fake, "RevokeSecurityGroupIngress") == {"GroupId": "sg-0win", "SecurityGroupRuleId.1": "sgr-0rdp0000000000007"}
+
+
+def test_route53s_throttling_is_waited_out_and_its_requests_spaced(env, tmp_path):
+    from plugin_platform_ec2 import Ec2Plugin
+
+    env(settings_of(EC2_REGIONS="us-east-1"))
+    fake = FakeAws()
+    fake.throttle = 1  # ListHostedZones answered HTTP 400 Throttling once
+    slept = []
+    p = Ec2Plugin(transport=fake, public=lambda: ("93.184.216.34", "OpenDNS"), sleep=slept.append, folder=tmp_path / "ec2")
+    zones = p.domains()
+    assert [z["id"] for z in zones] == [ZONE, PRIVATE] and fake.actions().count("ListHostedZones") == 2
+    assert max(slept) >= 1.0  # the throttle waited out (the client's backoff), the request asked again
+    _, api = p.clients()
+    api.records(ZONE)
+    api.records(PRIVATE)
+    assert any(0 < s <= 0.15 for s in slept)  # each request spaced from the last (Route 53: 10 a second)

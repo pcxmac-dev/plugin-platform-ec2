@@ -1,15 +1,16 @@
 """Amazon EC2 for Liminal (the user, 2026-11-11: "lets roll plugins for EC2, vultr, azure and google cloud"; "Free changes
 only"): the account's EC2 instances in every region it reads (their state, type, public IPv4 and IPv6 addresses, launch
 time, Name tag), their security groups and rules, key pairs, EBS volumes and Elastic IPs, and its Route 53 hosted zones
-and records; and the changes that cost nothing, each confirmed on the platform's page first: an instance started, stopped
-(a forced stop, or a stop that erases an instance store, asked twice) or rebooted; a Route 53 record set or removed, one
-record set a change, every other record of the zone untouched; an inbound security group rule authorized or revoked (one
-opening SSH, RDP or every port to the whole internet, or the last one letting SSH in to an instance, asked twice); a public
-key imported or a key pair deleted. Dynamic DNS keeps hosts of the account's public zones at this network's address (an
-UPSERT of the host's A record). Nothing that makes a billable thing: no instance launched, resized or ended, no volume,
-snapshot, image, address or zone made; a start resumes a stopped instance's compute charge, and its confirmation says so.
-EC2's API gives no prices: the page links the pricing pages, and says that a stopped EBS-backed instance stops its compute
-charge while its EBS volumes and Elastic IPs still bill.
+and records; and the changes that cost nothing, each confirmed on the platform's page first: an instance started (asked
+twice: its compute charge resumes), stopped (a forced stop, or a stop that erases an instance store, asked twice; an
+Auto Scaling group's instance never) or rebooted; a Route 53 record set or removed, one record set a change, every other
+record of the zone untouched; an inbound security group rule authorized or revoked (one opening SSH, RDP or every port
+to the whole internet, or the last one letting SSH or RDP in to an instance, asked twice); a public key imported or a key
+pair deleted. Dynamic DNS keeps hosts of the account's public zones at this network's address (an UPSERT of the host's A
+record to that one address), changing only what is its own: a host holding another address, or several, is left as it
+is until the user takes it over on the page. Nothing that makes a billable thing: no instance launched, resized or
+ended, no volume, snapshot, image, address or zone made. EC2's API gives no prices: the page links the pricing pages,
+and says that a stopped EBS-backed instance stops its compute charge while its EBS volumes and Elastic IPs still bill.
 
 Its settings are pairs asked of the login of the app it is attached to (settings.py: EC2_ACCESS_KEY_ID,
 EC2_SECRET_ACCESS_KEY, EC2_SESSION_TOKEN, EC2_REGIONS, EC2_DDNS_HOSTS, EC2_DDNS_MINUTES), never a file, never AWS_*. While
@@ -22,25 +23,29 @@ in a thread of its own; detached, nothing of it runs. Its status is what was rea
 """
 from __future__ import annotations
 
+import json
+import os
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from pathlib import Path
 
-from liminal_libs.machines.ddns import Host, Keeper, hosts_of
+from liminal_libs.machines.ddns import NOW_FORM, Host, Keeper, hosts_of
 from liminal_libs.machines.plugin import MachinePlugin
 
 from . import ec2 as ec2_mod
 from . import route53 as r53
 from . import settings as settings_mod
-from .aws import AwsClient, AwsError
+from .aws import AwsClient, AwsError, route53_throttled
 from .card import APIS, EBS_PRICING, EC2_NAME, IPV4_PRICING, PRICING, ROUTE53_NAME, STOPPED_COSTS
 from .ec2 import Ec2Api, covers, everywhere, rule_words
 from .route53 import ChangeInfo, RecordSet, Route53Api, Zone
 from .settings import ACCESS_KEY, DDNS_HOSTS, IAM_CONSOLE, KEYS, NAMES, REGIONS, SECRET_KEY, Config
 from .sigv4 import Signer
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 REFRESH_S = 900.0  # the account read again at most this often while attached (or by Refresh)
 REGIONS_S = 86400.0  # the regions enabled for the account asked again after a day
 CONFIG_S = 30.0  # the settings asked of the login again after this long
@@ -53,7 +58,9 @@ PUBLIC_IPV4 = (("myip.opendns.com", "a", "208.67.222.222", "OpenDNS"),
                ("o-o.myaddr.l.google.com", "txt", "216.239.32.10", "Google"))
 ACCEPT_POWER = "accept_data_loss"  # a stop erasing an instance store, a forced stop
 ACCEPT_OPEN = "accept_open"  # an inbound rule opening SSH, RDP or every port to the whole internet
-ACCEPT_LOCKOUT = "accept_lockout"  # a revoke taking away the last rule letting SSH in to an instance
+ACCEPT_LOCKOUT = "accept_lockout"  # a revoke taking away the last rule letting SSH (RDP to Windows) in to an instance
+ACCEPT_COSTS = "accept_costs"  # a start: the instance's compute charge resumes once it runs
+DIR_VAR = "LIMINAL_PLATFORM_DIR"  # the platform's own folder (its app's variable): Dynamic DNS's state under it
 REFUSED_KEY = frozenset({"AuthFailure", "InvalidClientTokenId", "SignatureDoesNotMatch", "OptInRequired", "RequestExpired",
                          "ExpiredToken", "InvalidToken", "MissingAuthenticationToken", "Blocked", "PendingVerification"})
 SSH, RDP = 22, 3389
@@ -91,6 +98,40 @@ class Refusal(ValueError):
     def __init__(self, message: str, accept: str | None = None):
         super().__init__(message)
         self.accept = accept
+
+
+def accepted(value) -> bool:
+    """A second confirmation, honoured only when it is exactly True (the page sends JSON true): "false", "yes" or 1 from a
+    local program is refused like a missing one."""
+    return value is True
+
+
+def platform_dir() -> Path:
+    """The platform's own folder: LIMINAL_PLATFORM_DIR, else the data folder's platform/ (where Namecheap keeps its own)."""
+    named = (os.environ.get(DIR_VAR) or "").strip()
+    if named:
+        return Path(named).expanduser()
+    from liminal_libs import layout
+
+    return layout.data_dir() / "platform"
+
+
+def host_names(text: str) -> set[str]:
+    """The hosts of EC2_DDNS_HOSTS as names (home.example.com; @.example.com is example.com), whatever zones are known."""
+    out = set()
+    for part in re.split(r"[,;\s]+", str(text or "")):
+        n = part.strip().rstrip(".").lower()
+        if n:
+            out.add(n[2:] if n.startswith("@.") else n)
+    return out
+
+
+def asg_words(label: str, group: str) -> str:
+    """Why an Auto Scaling group's instance is not stopped here (its aws:autoscaling:groupName tag names the group)."""
+    return (f"{label} belongs to the Auto Scaling group {group}: stopped, it fails the group's health check, and the group "
+            "ends it (its root volume with it, when set to go) and launches another instance in its place, which bills. "
+            "Nothing was sent: change the group instead, in the EC2 console's Auto Scaling groups (its desired capacity; or "
+            f"put {label} in standby first, which the group's health checks leave alone).")
 
 
 def when(t: float | None) -> str:
@@ -181,29 +222,35 @@ class Ec2Plugin(MachinePlugin):
     ICON = "ec2"  # the EC2 mark (liminal-libs 1.49.0's icons.js)
     HOOKS = (*MachinePlugin.HOOKS, "refresh", "regions", "servers", "firewalls", "key_pairs", "domains", "records", "power",
              "authorize_ingress", "revoke_ingress", "import_key", "delete_key", "set_record", "remove_record", "change",
-             "ddns_update")
+             "ddns_update", "ddns_take_over")
     keys = KEYS
     signup = IAM_CONSOLE
     limits = ("EC2: per account and region, a describe 100 at once and 20 a second, a change 50 and 5 (StartInstances 5 and "
               "2); Route 53: 50 requests at once and 10 a second for the account")
     apis = APIS
 
-    def __init__(self, transport=None, public=None, clock=None, sleep=None):
+    def __init__(self, transport=None, public=None, clock=None, sleep=None, folder: Path | None = None):
         self._transport = transport  # (method, url, headers, body, timeout) -> (status, headers, body): a test's
         self._public = public  # () -> (address, whose): a test's stand-in for asking DNS this network's address
         self._clock = clock or time.time
-        self._sleep = sleep  # how a client waits out a rate limit (a test's: no wait)
+        self._sleep = sleep  # how a client waits out a rate limit and spaces Route 53's requests (a test's: no wait)
+        self._folder = Path(folder) if folder is not None else None  # its folder (a test's), else the platform's ec2/
         self._rt = _Runtime()
 
+    @property
+    def folder(self) -> Path:
+        """Where it keeps what is its own: the platform's folder's ec2/ (Dynamic DNS's ddns.json)."""
+        return self._folder if self._folder is not None else platform_dir() / self.name
+
     # -- the settings and the clients -------------------------------------------------------------------------------------
-    def config(self, fresh: bool = False) -> Config:
-        """The settings, asked of the login (the attached app's, else the environment's); kept CONFIG_S."""
+    def config(self, fresh: bool = False, login=None) -> Config:
+        """The settings, asked of the login (`login`, else the attached app's, else the environment's); kept CONFIG_S."""
         now = time.monotonic()
         with self._rt.lock:
             kept = self._rt.config
         if kept is not None and not fresh and now - kept[0] < CONFIG_S:
             return kept[1]
-        cfg = settings_mod.read(self.login)
+        cfg = settings_mod.read(login if login is not None else self.login)
         with self._rt.lock:
             self._rt.config = (now, cfg)
         return cfg
@@ -221,7 +268,12 @@ class Ec2Plugin(MachinePlugin):
 
     def clients(self) -> tuple[Ec2Api, Route53Api]:
         """EC2's and Route 53's APIs with the settings as they are (ValueError when they are not set)."""
-        cfg = self._ready()
+        return self._clients_for(self._ready())
+
+    def _clients_for(self, cfg: Config) -> tuple[Ec2Api, Route53Api]:
+        """The clients of these settings (made once for them; a pass asks no setting again)."""
+        if not cfg.api_ready:
+            raise ValueError("the API is not set up: " + ("; ".join(cfg.incomplete) or HOW_TO))
         with self._rt.lock:
             held = self._rt.clients
         if held is not None and held[0] == cfg.api_print:
@@ -231,17 +283,26 @@ class Ec2Plugin(MachinePlugin):
         if self._sleep is not None:
             options["sleep"] = self._sleep
         made = (cfg.api_print, Ec2Api(AwsClient(ec2_mod.endpoint(ec2_mod.HOME_REGION), signer=signer, **options)),
-                Route53Api(AwsClient(r53.BASE, signer=signer, **options)))
+                Route53Api(AwsClient(r53.BASE, signer=signer, throttled=route53_throttled, **options),
+                           **({"sleep": self._sleep} if self._sleep is not None else {})))
         with self._rt.lock:
             self._rt.clients = made
         return made[1], made[2]
 
     def keeper(self) -> Keeper:
+        """Dynamic DNS's keeper: it changes only what is its own (liminal-libs 1.49.2), kept in the folder's ddns.json."""
         with self._rt.lock:
             if self._rt.keeper is None:
                 self._rt.keeper = Keeper(read=self._ddns_read, write=self._ddns_write, servers=PUBLIC_IPV4,
-                                         public=self._public, clock=self._clock)
+                                         public=self._public, clock=self._clock, state=self.folder / "ddns.json")
             return self._rt.keeper
+
+    def _held(self) -> tuple[Ec2Api, Route53Api]:
+        """The clients made last (a pass under way asks no setting again: once detached, nothing reads the process's
+        environment); made now when there are none."""
+        with self._rt.lock:
+            held = self._rt.clients
+        return (held[1], held[2]) if held is not None else self.clients()
 
     def present(self) -> bool:
         """Whether anything of it is set."""
@@ -280,10 +341,12 @@ class Ec2Plugin(MachinePlugin):
             rt = self._rt
             rt.api_ok, rt.api_error, rt.api_error_at, rt.api_print = False, words, now, cfg.api_print
 
-    def _refresh(self, cfg: Config) -> dict:
+    def _refresh(self, cfg: Config, stop: threading.Event | None = None) -> dict:
+        """A refresh with these settings (asked of no login again); `stop` set (the plugin detached) ends it before its
+        next request, and nothing it read is kept."""
         now = self._clock()
         try:
-            ec2api, r53api = self.clients()
+            ec2api, r53api = self._clients_for(cfg)
             regions = self.region_names(cfg, ec2api)
         except (AwsError, ValueError) as e:
             self._failed(cfg, now, str(e))
@@ -291,15 +354,19 @@ class Ec2Plugin(MachinePlugin):
         reads: dict[str, RegionRead] = {}
         if regions:
             with ThreadPoolExecutor(max_workers=min(REGION_WORKERS, len(regions)), thread_name_prefix="ec2-region") as pool:
-                pending = [(region, pool.submit(self._read_region, ec2api, region, i == 0))
+                pending = [(region, pool.submit(self._read_region, ec2api, region, i == 0, stop))
                            for i, region in enumerate(regions)]
                 for region, done in pending:
                     reads[region] = done.result()
+        if stop is not None and stop.is_set():
+            return {"regions": len(regions), "stopped": True}
         if regions and all(r.refused for r in reads.values()):
             words = next(iter(reads.values())).errors.get("instances", "every region refused the key")
             self._failed(cfg, now, words)
             raise AwsError(words)
-        zones, zones_error, records = self._read_zones(r53api)
+        zones, zones_error, records = self._read_zones(r53api, stop)
+        if stop is not None and stop.is_set():
+            return {"regions": len(regions), "stopped": True}
         account = next((r.account for r in reads.values() if r.account), "")
         with self._rt.lock:
             rt = self._rt
@@ -309,9 +376,13 @@ class Ec2Plugin(MachinePlugin):
         return {"regions": len(regions), "instances": sum(len(r.instances) for r in reads.values()),
                 "zones": len(zones or []), "refreshedAt": when(now)}
 
-    def _read_region(self, api: Ec2Api, region: str, attributes: bool = False) -> RegionRead:
-        """One region read, each part on its own (a part the key may not read is said, the rest read)."""
+    def _read_region(self, api: Ec2Api, region: str, attributes: bool = False,
+                     stop: threading.Event | None = None) -> RegionRead:
+        """One region read, each part on its own (a part the key may not read is said, the rest read); `stop` set ends it
+        before its next request."""
         rr = RegionRead(region, read_at=self._clock())
+        if stop is not None and stop.is_set():
+            return rr
         try:
             rr.instances, rr.account = api.instances(region)
         except AwsError as e:
@@ -325,11 +396,13 @@ class Ec2Plugin(MachinePlugin):
                  ("addresses", lambda: api.addresses(region)), ("snapshots", lambda: api.snapshot_count(region)),
                  ("images", lambda: api.image_count(region)))
         for part, read in parts:
+            if stop is not None and stop.is_set():
+                return rr
             try:
                 setattr(rr, part, read())
             except AwsError as e:
                 rr.errors[part] = str(e)
-        if attributes:
+        if attributes and not (stop is not None and stop.is_set()):
             try:
                 rr.attributes = api.account_attributes(region)
             except AwsError as e:
@@ -338,7 +411,7 @@ class Ec2Plugin(MachinePlugin):
             rr.account = next((g["owner"] for g in rr.groups if g.get("owner")), "")
         return rr
 
-    def _read_zones(self, api: Route53Api) -> tuple[list[Zone] | None, str, dict]:
+    def _read_zones(self, api: Route53Api, stop: threading.Event | None = None) -> tuple[list[Zone] | None, str, dict]:
         try:
             zones = api.zones()
         except AwsError as e:
@@ -346,6 +419,8 @@ class Ec2Plugin(MachinePlugin):
         records: dict = {}
         ordered = sorted(zones, key=lambda z: (z.private, z.name))
         for z in ordered[:ZONES_MAX]:
+            if stop is not None and stop.is_set():
+                return zones, "", records
             try:
                 records[z.id] = api.records(z.id)
             except AwsError as e:
@@ -447,9 +522,12 @@ class Ec2Plugin(MachinePlugin):
             raise ValueError(f"{iid} is not an instance in {region}")
         return found
 
-    def power(self, region: str, instance: str, action: str, accept_data_loss: bool = False) -> dict:
+    def power(self, region: str, instance: str, action: str, accept_data_loss: bool = False,
+              accept_costs: bool = False) -> dict:
         """An instance started, stopped (gracefully; `force-stop` without flushing its file systems), or rebooted, read
-        afresh first. A stop that erases an instance store, or a forced one, is refused unless `accept_data_loss`."""
+        afresh first. A start (its compute charge resumes) is refused unless `accept_costs`; a stop that erases an instance
+        store, or a forced one, unless `accept_data_loss` (each honoured only when exactly True); the stop of an Auto
+        Scaling group's instance is refused outright (the group would end it and launch another)."""
         region = self._region(region)
         act = str(action or "").strip().lower().replace(" ", "-").replace("_", "-")
         act = {"on": "start", "off": "stop", "power-on": "start", "shutdown": "stop", "force": "force-stop"}.get(act, act)
@@ -465,6 +543,10 @@ class Ec2Plugin(MachinePlugin):
                 raise Refusal(f"{label} is {state} already")
             if state != "stopped":
                 raise Refusal(f"{label} is {state}: only a stopped instance is started")
+            if not accepted(accept_costs):
+                raise Refusal(f"Starting {label} resumes its compute charge: once it runs, its type {inst['type']} bills by "
+                              "the second (a minute at least each start), beside its EBS volumes and Elastic IPs, which "
+                              "never stopped billing. Nothing was sent: asked again, it is started.", accept=ACCEPT_COSTS)
             done = api.start(region, inst["id"])
             lines.append("once it runs its compute charge resumes, by the second (a minute at least), beside the charges "
                          "that never stopped (its EBS volumes and Elastic IPs); its public IPv4 address is a new one "
@@ -483,6 +565,8 @@ class Ec2Plugin(MachinePlugin):
                 raise Refusal(f"{label} is {state} already")
             if act == "stop" and state == "stopping":
                 raise Refusal(f"{label} is stopping already (a forced stop is for one stuck in stopping)")
+            if inst.get("asg"):
+                raise Refusal(asg_words(label, inst["asg"]))
             try:
                 kind = self._type_of(api, region, inst["type"])
             except AwsError as e:  # not known: taken as having one (asked twice), and said why
@@ -498,7 +582,7 @@ class Ec2Plugin(MachinePlugin):
             if act == "force-stop":
                 risks.append("a forced stop does not flush its file systems: unsaved data may be lost, and they need a "
                              "check and repair after it")
-            if risks and not accept_data_loss:
+            if risks and not accepted(accept_data_loss):
                 raise Refusal(f"Stopping {label} may lose data: " + "; ".join(risks) + ". Nothing was sent: asked again, "
                               "it is stopped anyway.", accept=ACCEPT_POWER)
             done = api.stop(region, inst["id"], force=(act == "force-stop"))
@@ -557,7 +641,7 @@ class Ec2Plugin(MachinePlugin):
         rule = {"protocol": proto, "from": low, "to": high, "cidr4": cidr if ":" not in cidr else "",
                 "cidr6": cidr if ":" in cidr else "", "egress": False}
         opens = self._opens(rule)
-        if everywhere(cidr) and opens and not accept_open:
+        if everywhere(cidr) and opens and not accepted(accept_open):
             raise Refusal(f"{rule_words(rule)} opens {opens} to the whole internet: anyone may try to sign in or reach "
                           "every service. Nothing was sent: asked again, it is authorized anyway.", accept=ACCEPT_OPEN)
         api, _ = self.clients()
@@ -584,8 +668,9 @@ class Ec2Plugin(MachinePlugin):
         return " and ".join(found)
 
     def revoke_ingress(self, group: str, rule: str, accept_lockout: bool = False) -> dict:
-        """An inbound rule (`rule`: sgr-…) revoked from a security group (`group`: region/sg-…), read afresh first. The last
-        rule letting SSH in to an instance of the group is refused unless `accept_lockout`."""
+        """An inbound rule (`rule`: sgr-…) revoked from a security group (`group`: region/sg-…), it and the region's rules
+        read afresh first. The last rule letting SSH in to an instance of the group (RDP to a Windows one) is refused unless
+        `accept_lockout` (honoured only when exactly True)."""
         region, gid = self._group(group)
         rid = str(rule or "").strip()
         if not rid.startswith("sgr-"):
@@ -599,35 +684,38 @@ class Ec2Plugin(MachinePlugin):
             raise Refusal(f"{rid} is a rule of {r['group']}, not of {gid}")
         if r["egress"]:
             raise Refusal(f"{rid} is an outbound rule: only inbound rules are revoked here")
-        lost = self._ssh_lost(region, gid, r)
-        if lost and not accept_lockout:
-            raise Refusal(f"{rule_words(r)} is the last rule letting SSH in to {', '.join(lost)}: revoking it may leave no "
-                          "way in over SSH. Nothing was sent: asked again, it is revoked anyway.", accept=ACCEPT_LOCKOUT)
+        rules = api.security_group_rules(region)  # what lets each instance in now, not as last read
+        lost = self._way_in_lost(region, gid, r, rules)
+        if lost and not accepted(accept_lockout):
+            raise Refusal(f"{rule_words(r)} is the last rule letting {' and '.join(lost)}: revoking it may leave no way in. "
+                          "Nothing was sent: asked again, it is revoked anyway.", accept=ACCEPT_LOCKOUT)
         api.revoke_ingress(region, gid, rid)
         with self._rt.lock:
             rr = self._rt.reads.get(region)
             if rr is not None:
-                rr.rules = [x for x in rr.rules if x["id"] != rid]
+                rr.rules = [x for x in rules if x["id"] != rid]
         return {"group": gid, "region": region, "rule": rid, "said": f"revoked {rule_words(r)} from {gid}", "lines": []}
 
-    def _ssh_lost(self, region: str, gid: str, rule: dict) -> list[str]:
-        """The instances of the group that no other inbound rule of their groups lets SSH in to once `rule` is gone."""
-        if rule.get("protocol") not in ("tcp", "-1") or not covers(rule.get("from"), rule.get("to"), SSH):
+    def _way_in_lost(self, region: str, gid: str, rule: dict, rules: list[dict]) -> list[str]:
+        """What `rule` is the last way in to, in words ("SSH in to web (i-…)", "RDP in to win (i-…)"): each instance of the
+        group (RDP for a Windows one, SSH for the rest) that no other inbound rule of its groups (`rules`, read now) lets
+        in once `rule` is gone."""
+        if rule.get("protocol") not in ("tcp", "-1"):
             return []
         with self._rt.lock:
             rr = self._rt.reads.get(region)
             instances = [i for i in (rr.instances if rr else []) if i["state"] not in ENDED]
-            rules = list(rr.rules if rr else [])
-        out = []
+        lost: dict[str, list[str]] = {}
         for inst in instances:
             groups = {g for g, _ in inst["groups"]}
-            if gid not in groups:
+            way, port = ("RDP", RDP) if "windows" in str(inst.get("platform") or "").lower() else ("SSH", SSH)
+            if gid not in groups or not covers(rule.get("from"), rule.get("to"), port):
                 continue
             others = [x for x in rules if x["id"] != rule["id"] and not x["egress"] and x["group"] in groups
-                      and x["protocol"] in ("tcp", "-1") and covers(x["from"], x["to"], SSH)]
+                      and x["protocol"] in ("tcp", "-1") and covers(x["from"], x["to"], port)]
             if not others:
-                out.append(f"{inst['name']} ({inst['id']})" if inst["name"] else inst["id"])
-        return out
+                lost.setdefault(way, []).append(f"{inst['name']} ({inst['id']})" if inst["name"] else inst["id"])
+        return [f"{way} in to {', '.join(names)}" for way, names in lost.items()]
 
     # -- the changes: key pairs -------------------------------------------------------------------------------------------------
     def import_key(self, region: str, name: str, public_key: str) -> dict:
@@ -740,8 +828,10 @@ class Ec2Plugin(MachinePlugin):
         return zones[0]
 
     def _ddns_read(self, host: Host) -> list[str] | None:
+        """The addresses the host's A record holds (Route 53's record set read now); one with an alias target or a routing
+        policy is never Dynamic DNS's: said, and never written."""
         zone = self._public_zone(host.zone)
-        _, api = self.clients()
+        _, api = self._held()
         found = api.record_set(zone.id, host.fqdn, "A")
         if found is None:
             return []
@@ -753,8 +843,10 @@ class Ec2Plugin(MachinePlugin):
         return list(found.values)
 
     def _ddns_write(self, host: Host, ip: str) -> str:
+        """The host's A record set to exactly `ip` (an UPSERT of that one record set). The keeper asks it only of a record
+        that is its own (none, already this network's, the address it set last) or that the user let it take over."""
         zone = self._public_zone(host.zone)
-        _, api = self.clients()
+        _, api = self._held()
         with self._rt.lock:
             ttl = self._rt.ttls.get(host.fqdn, DDNS_TTL)
         after = RecordSet(name=host.fqdn, type="A", ttl=ttl, values=(ip,))
@@ -770,13 +862,26 @@ class Ec2Plugin(MachinePlugin):
             return [], []
         return hosts_of(cfg.hosts, [z.name for z in zones if not z.private])
 
-    def ddns_update(self, force: bool = True) -> list[dict]:
-        """A Dynamic DNS pass now (the page's Update DNS now: `force`, an UPSERT for every host whether its record differs
-        or not; the command line's `ddns` without --now writes only where it differs)."""
+    def _let_go(self, cfg: Config) -> None:
+        """The hosts taken out of EC2_DDNS_HOSTS are no longer the keeper's (neither its own nor taken over), whatever
+        zones are read: those it holds in its state file and those it kept in this run."""
+        keeper = self.keeper()
+        wanted = host_names(cfg.hosts)
+        held: set[str] = {s.fqdn for s in keeper.states()}
+        try:
+            data = json.loads((self.folder / "ddns.json").read_text(encoding="utf-8"))
+            held |= {str(k).lower() for k in (data.get("own") or {})} | {str(x).lower() for x in (data.get("taken") or [])}
+        except (OSError, ValueError, AttributeError):
+            pass
+        for fqdn in sorted(held - wanted):
+            keeper.let_go(fqdn)
+
+    def _ddns_ready(self) -> tuple[Config, list[Host]]:
         cfg = self.config(fresh=True)
         if not cfg.ddns_ready:
             raise ValueError("Dynamic DNS is not set up: " + ("; ".join(cfg.incomplete) or
                                                               f"{DDNS_HOSTS}, with {ACCESS_KEY} and {SECRET_KEY}"))
+        self.clients()  # the clients of the settings as they are now
         with self._rt.lock:
             known = self._rt.zones is not None
         if not known:
@@ -784,10 +889,38 @@ class Ec2Plugin(MachinePlugin):
         hosts, wrong = self.ddns_hosts(cfg)
         if not hosts:
             raise ValueError("no Dynamic DNS host is in a public zone of the account: " + ("; ".join(wrong) or DDNS_HOSTS))
-        out = self.keeper().run_pass(hosts, force=bool(force))
+        self._let_go(cfg)
+        return cfg, hosts
+
+    def ddns_update(self, force: bool = True) -> list[dict]:
+        """A Dynamic DNS pass now (the page's Update DNS now, once confirmed: `force`, an UPSERT of every host that is its
+        own whether it differs or not; never one holding another address: that one is taken over first). The command
+        line's `ddns` without --now writes only where it differs."""
+        cfg, hosts = self._ddns_ready()
+        out = self.keeper().run_pass(hosts, force=force is True)
         with self._rt.lock:
             self._rt.ddns_print, self._rt.ddns_at = cfg.ddns_print, self._clock()
         return out
+
+    def ddns_take_over(self, host: str, holds: str | None = None) -> dict:
+        """A host holding another address taken over (the page's Take over…, once confirmed: `holds`, what its record
+        held as the confirmation said), then a pass for it: its A record set to this network's address. Refused, nothing
+        changed, when the record holds something else by now."""
+        cfg, hosts = self._ddns_ready()
+        name = str(host or "").strip().rstrip(".").lower()
+        found = next((h for h in hosts if h.fqdn == name), None)
+        if found is None:
+            raise ValueError(f"{host!r} is none of the Dynamic DNS hosts set ({DDNS_HOSTS})")
+        keeper = self.keeper()
+        st = keeper.state(found.fqdn)
+        now = ", ".join(st.holds) if st is not None else ""
+        if holds is not None and now and str(holds).strip() != now:
+            raise Refusal(f"{found.fqdn} holds {now} now, not {holds} as confirmed: look again before taking it over")
+        keeper.take_over(found.fqdn)
+        out = keeper.run_pass([found], force=False)
+        with self._rt.lock:
+            self._rt.ddns_print, self._rt.ddns_at = cfg.ddns_print, self._clock()
+        return out[0] if out else {"host": found.fqdn, "result": "taken over: set on the next pass"}
 
     # -- what it learned of its APIs ----------------------------------------------------------------------------------------------
     def api_facts(self) -> dict:
@@ -809,13 +942,20 @@ class Ec2Plugin(MachinePlugin):
 
     # -- attached: the reading in the background -----------------------------------------------------------------------------------
     def attach(self, app, login=None) -> dict:
-        """Attached by the platform: its settings asked of the platform's login from now on; the account read and the
-        Dynamic DNS hosts checked in the background."""
+        """Attached: its settings asked of the app's login from now on. Only the platform's attaching starts the reading in
+        the background (the account, the Dynamic DNS hosts): the charts app run alone attaches every plugin it finds, and
+        starts nothing of this one."""
         interface = super().attach(app, login)
         with self._rt.lock:
             self._rt.config = None
-        self._start()
+        if self.reading:
+            self._start()
         return interface
+
+    @property
+    def reading(self) -> bool:
+        """Whether it reads in the background: attached by the platform (its app's NAME), and only then."""
+        return self.app is not None and getattr(self.app, "NAME", "") == "platform"
 
     def detach(self) -> None:
         """Detached (the platform ending, the plugin disabled or not valid): the background reading ends."""
@@ -858,12 +998,15 @@ class Ec2Plugin(MachinePlugin):
             now = time.monotonic()
             cfg = None
             try:
-                cfg = self.config()
+                login = self.login
+                if stop.is_set() or login is None:  # detached: no setting is read of the process's environment
+                    break
+                cfg = self.config(login=login)
                 if cfg.api_ready and now >= next_api:
                     next_api = now + REFRESH_S
                     if self._rt.refreshing.acquire(blocking=False):  # Refresh asked meanwhile: that one is enough
                         try:
-                            self._refresh(cfg)
+                            self._refresh(cfg, stop)
                         except Exception:  # noqa: BLE001 - kept as its outcome (api_error), shown by the status
                             pass
                         finally:
@@ -873,7 +1016,8 @@ class Ec2Plugin(MachinePlugin):
                     hosts, _ = self.ddns_hosts(cfg)
                     if hosts:
                         try:
-                            self.keeper().run_pass(hosts, force=False, wait=0.5)
+                            self._let_go(cfg)
+                            self.keeper().run_pass(hosts, force=False, wait=0.5, stop=stop)  # ends before a write once detached
                             with self._rt.lock:
                                 self._rt.ddns_print, self._rt.ddns_at = cfg.ddns_print, self._clock()
                         except Exception:  # noqa: BLE001 - a pass under way (Update DNS now), or its trouble kept by the hosts
@@ -894,7 +1038,7 @@ class Ec2Plugin(MachinePlugin):
         if not cfg.present:
             return {"present": False, "valid": False, "why": NOT_SET, "summary": "not set up",
                     "settingsNotSet": ", ".join(NAMES), "tables": [], "actions": [], "forms": []}
-        rt, now, attached = self._rt, self._clock(), self.app is not None
+        rt, now, attached = self._rt, self._clock(), self.reading  # read in the background only under the platform
         with rt.lock:
             reads, zones, zones_error = dict(rt.reads), rt.zones, rt.zones_error
             records, changes, account = dict(rt.records), dict(rt.changes), rt.account
@@ -957,8 +1101,11 @@ class Ec2Plugin(MachinePlugin):
         out["actions"] = [{"hook": "refresh", "args": [], "title": "Refresh",
                            "note": "every region and the Route 53 zones read again now (about ten requests a region)"}]
         if cfg.ddns_ready:
-            out["actions"].append({"hook": "ddns_update", "args": [], "title": "Update DNS now",
-                                   "note": "each Dynamic DNS host's A record set to this network's address now (an UPSERT)"})
+            keeper = self.keeper()
+            out["forms"] += [keeper.take_form(), keeper.now_form()]
+            out["actions"].append({"form": NOW_FORM, "title": "Update DNS now",
+                                   "note": ("each host that is Dynamic DNS's own set to this network's address now, once "
+                                            "confirmed (a host holding another address is left as it is)")})
         return out
 
     def _summary(self, cfg, works, api_error, reads, zones, hosts, states, attached) -> str:
@@ -989,7 +1136,7 @@ class Ec2Plugin(MachinePlugin):
     def _tables(self, cfg, reads, zones, zones_error, records, changes, hosts, attached) -> list[dict]:
         out = []
         if cfg.ddns_ready:
-            table = self.keeper().table(hosts, cfg.minutes, attached=attached, when=when)
+            table = self.keeper().table(hosts, cfg.minutes, attached=attached, when=when, take=True)
             if zones is None:
                 table["empty"] = "The Route 53 zones are read first (Refresh)."
             out.append(table)
@@ -1188,27 +1335,34 @@ class Ec2Plugin(MachinePlugin):
             choices = ["force-stop"]
         else:
             choices = ["start", "stop", "reboot", "force-stop"]
-        if i["root"] == "instance-store":
-            choices = [c for c in choices if c == "reboot"] or ["reboot"]
+        if i["root"] == "instance-store" or i.get("asg"):  # never stopped here: AWS cannot, or its group would replace it
+            choices = [c for c in choices if c not in ("stop", "force-stop")] or ["reboot"]
         kind = r.types.get(i["type"], {})
         label = i["name"] or i["id"]
         said = []
         if "start" in choices:
-            said.append(START_WORDS)
+            said.append(START_WORDS + " (you are asked again first)")
         if "stop" in choices or "force-stop" in choices:
             said.append(STOP_WORDS + ("; its type's instance store volumes are erased by a stop (you are asked again "
                                       "first)" if kind.get("instanceStore") else ""))
         if choices == ["reboot"]:
             said.append("a reboot keeps it running, billed as it is")
-        return {"id": f"power:{r.name}:{i['id']}", "hook": "power", "title": f"Power: {label}",
-                "note": f"{label} is {state} in {r.name} ({i['type']}).",
+        note = f"{label} is {state} in {r.name} ({i['type']})."
+        if i.get("asg"):
+            note += (f" It belongs to the Auto Scaling group {i['asg']}: it is not stopped here (the group would end it and "
+                     "launch another); change the group instead.")
+        return {"id": f"power:{r.name}:{i['id']}", "hook": "power", "title": f"Power: {label}", "note": note,
                 "fields": [{"name": "region", "label": "Region", "type": "fixed", "value": r.name},
                            {"name": "instance", "label": "Instance", "type": "fixed", "value": i["id"]},
                            {"name": "action", "label": "Action", "type": "choice", "value": choices[0],
                             "choices": [{"value": c, "title": POWER[c]} for c in choices]},
                            {"name": ACCEPT_POWER, "type": "accept", "title": "Stop anyway?", "yes": "Stop anyway",
                             "words": ("Stopping {instance} may lose data, as said: an instance store's data is erased by "
-                                      "a stop, and a forced stop does not flush the file systems.")}],
+                                      "a stop, and a forced stop does not flush the file systems.")},
+                           {"name": ACCEPT_COSTS, "type": "accept", "title": "Start it, and its charge?", "yes": "Start it",
+                            "words": ("Started, {instance} bills again: once it runs, its compute charge resumes by the "
+                                      "second (a minute at least each start), beside its EBS volumes and Elastic IPs, "
+                                      "which never stopped billing.")}],
                 "submit": "Review",
                 "confirm": {"title": f"{label}: {{action}}?",
                             "words": "{action} " + f"{label} in {r.name}: " + "; ".join(said) + ".",

@@ -31,7 +31,9 @@ EBS-backed instance stops its compute charge, but its EBS volumes and Elastic IP
 minute at least, then by the second.
 
 While attached to the platform app it reads the account every quarter of an hour and checks the Dynamic DNS hosts every
-`EC2_DDNS_MINUTES` (5), in a thread of its own. Detached, nothing of it runs. Its status is what was read last: no
+`EC2_DDNS_MINUTES` (5), in a thread of its own. Only the platform's attaching starts that: the charts app run alone,
+which attaches every plugin it finds, starts nothing of it. Detached, nothing of it runs: a pass under way ends before
+its next request, and reads no setting again. Its status is what was read last: no
 request is made to answer it. **Refresh** reads everything again now.
 
 ## What it changes (free changes only)
@@ -42,12 +44,15 @@ page then asks a second, explicit time.
 - **Power…** on each instance: **Start**, **Stop** (a graceful shutdown), **Reboot**, and **Force stop** (for one stuck
   in stopping: its file systems are not flushed). A forced stop, and the stop of an instance whose type has instance
   store volumes (a stop erases their data), are asked twice. An instance store-backed instance cannot be stopped at all
-  (AWS only reboots it). Each one is read afresh before it is changed. A start is asked once, its confirmation saying
-  that the instance's compute charge resumes once it runs, beside the charges that never stopped (its EBS volumes and
-  Elastic IPs).
+  (AWS only reboots it), and an Auto Scaling group's instance (its `aws:autoscaling:groupName` tag) is never stopped
+  here: stopped, it fails the group's health check, and the group ends it and launches another, which bills; the
+  refusal names the group, to change instead. Each one is read afresh before it is changed. A start is asked twice: its
+  compute charge resumes once it runs, beside the charges that never stopped (its EBS volumes and Elastic IPs).
+  A second confirmation counts only when it is exactly `true` (what the page sends).
 - **Authorize an inbound rule…** (a security group, a protocol, ports, a source address range, a description) and a
   **Revoke** on each inbound rule (by its rule ID, read afresh first). A rule opening SSH (22), RDP (3389) or every port
-  to the whole internet (0.0.0.0/0, ::/0), and the revoke of the last rule letting SSH in to an instance, are asked twice.
+  to the whole internet (0.0.0.0/0, ::/0), and the revoke of the last rule letting SSH in to an instance (RDP to a
+  Windows one), judged over the region's rules read afresh, are asked twice.
   Outbound rules are shown, not changed.
 - **Import a public key…** (an OpenSSH `ssh-ed25519` or `ssh-rsa` line, the `.pub` file; a private key is refused
   outright) and a **Delete** on each key pair (instances launched with it keep the key they hold).
@@ -146,9 +151,16 @@ read (one not enabled for the account), or a part of one its policy does not all
 
 This network's public IPv4 address is asked of DNS (`myip.opendns.com` of OpenDNS's resolver, else Google's
 `o-o.myaddr.l.google.com`, each asked by its IPv4 address), then each host's A record of its Route 53 public zone
-(ListResourceRecordSets). Where they differ, an `UPSERT` of that one record (ChangeResourceRecordSets) sets it, keeping
-its TTL (300 s for one it makes). **Update DNS now** writes every host whatever it holds. A host in no public zone of the
-account is said, a private zone is never used, and an alias or routing policy A record is never written over.
+(ListResourceRecordSets). It changes only what is its own (liminal-libs' Keeper): a host with no A record is made, and
+one already pointing at this network, or at the address it set last, is kept current with an `UPSERT` of that one
+record set to exactly one address (ChangeResourceRecordSets), keeping its TTL (300 s for one it makes). A host holding
+another address, or several, is left as it is and said so, with a **Take over…** on its row: taken over (confirmed,
+naming what it holds and that whatever answers there stops answering), it is pointed here on the next pass. Several
+addresses are never cut to one unasked. Just before a write the address is asked again, so a stale one is never written
+back. What is its own is kept in the platform's folder (`LIMINAL_PLATFORM_DIR`, else the data folder's `platform/`),
+`ec2/ddns.json`, so it is known after a restart; a host taken out of `EC2_DDNS_HOSTS` is let go. **Update DNS now** is
+confirmed first, and sets its own hosts whatever they hold. A host in no public zone of the account is said, a private
+zone is never used, and an alias or routing policy A record is never written over.
 
 ## Its API
 
@@ -186,7 +198,8 @@ while it ran (the requests made, the last answer, the account, the regions) is i
 `authorize_ingress(group, protocol, ports, source, description=None, accept_open=False)`,
 `revoke_ingress(group, rule, accept_lockout=False)`, `import_key(region, name, public_key)`,
 `delete_key(region, key, name=None)`, `set_record(zone, name, rtype, value, ttl=None, how=None)`,
-`remove_record(zone, name, rtype, value)`, `ddns_update(force=True)`. A refusal names the argument that accepts it
+`remove_record(zone, name, rtype, value)`, `ddns_update(force=True)`, `ddns_take_over(host, holds=None)`;
+`power` takes `accept_costs=False` after `accept_data_loss` too. A refusal names the argument that accepts it
 (`Refusal.accept`), which the page asks as its second confirmation.
 
 ## From the command line
