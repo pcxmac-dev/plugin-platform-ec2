@@ -56,7 +56,10 @@ def test_the_cards_conform_and_name_exactly_the_calls_its_clients_make():
     assert {c.name for c in r53_card.used} == set(route53.READS) | set(route53.WRITES)
     assert {c.name for c in ec2_card.used if c.writes} == set(ec2.WRITES)
     assert {c.name for c in r53_card.used if c.writes} == set(route53.WRITES)
-    assert not any(c.costs for api in card.APIS for c in api.used)  # nothing it makes starts a charge
+    # the one call it makes that bills: a start, resuming a stopped instance's compute charge (said when confirmed)
+    assert {c.name for api in card.APIS for c in api.used if c.costs} == {"StartInstances"}
+    start = next(c for c in ec2_card.calls if c.name == "StartInstances")
+    assert start.writes and "starts the compute charge again" in start.about
     # every action string the EC2 client sends is one of its READS and WRITES (call() refuses another), and each is sent
     sent = set()
     for mod in (ec2, module):
@@ -76,10 +79,12 @@ def test_the_cards_conform_and_name_exactly_the_calls_its_clients_make():
 
 
 def test_nothing_that_costs_is_in_its_clients_sources():
-    """No call that starts or raises a charge (the cards' costs=True calls), nor one that ends or deletes a billable thing,
-    nor Cost Explorer (each of its requests costs), is named outside the API card."""
-    costly = {c.name for api in card.APIS for c in api.calls if c.costs}
+    """No call that starts or raises a charge (the cards' costs=True calls) but the start it makes and confirms (a stopped
+    instance's compute charge resumed), nor one that ends or deletes a billable thing, nor Cost Explorer (each of its
+    requests costs), is named outside the API card."""
+    costly = {c.name for api in card.APIS for c in api.calls if c.costs and not c.used}
     assert {"RunInstances", "CreateVolume", "CreateSnapshot", "AllocateAddress", "CreateHostedZone"} <= costly
+    assert "StartInstances" not in costly
     never = costly | {"TerminateInstances", "DeleteVolume", "ReleaseAddress", "DeleteHostedZone", "ModifyInstanceAttribute",
                       "RegisterDomain", "GetCostAndUsage", "costexplorer", "ce.us-east-1.amazonaws.com", "AllRegions=true"}
     for mod in (module, aws, ec2, route53, sigv4, settings, cli):

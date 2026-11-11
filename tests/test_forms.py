@@ -75,9 +75,16 @@ def test_every_form_asks_a_hook_with_its_arguments_in_order(ready):
                for i in ("i-0web0000000000001", "i-0db00000000000002", "i-0eph0000000000003")}
     assert actions == {"i-0web0000000000001": ["stop", "reboot", "force-stop"], "i-0db00000000000002": ["start"],
                        "i-0eph0000000000003": ["reboot"]}
-    power = forms["power:us-east-1:i-0db00000000000002"]
-    assert "EBS volumes and Elastic IPs still bill" in power["confirm"]["words"]
-    assert "instance store volumes: a stop erases their data" in power["confirm"]["words"]
+    # a start (db is stopped) says its compute charge resumes once it runs, beside the charges that never stopped
+    start = forms["power:us-east-1:i-0db00000000000002"]
+    assert start["confirm"]["words"] == ("{action} db in us-east-1: once it runs, its compute charge resumes (by the second, "
+                                         "a minute at least each start), beside the charges that never stopped: its EBS "
+                                         "volumes and Elastic IPs.")
+    assert start["confirm"].get("danger") is False  # asked once: no second confirmation for a start
+    stop = forms["power:us-east-1:i-0web0000000000001"]["confirm"]["words"]  # web runs: a stop's words
+    assert "stopped, an EBS-backed instance stops its compute charge; its EBS volumes and Elastic IPs still bill" in stop
+    assert "resumes" not in stop and "instance store" not in stop  # t3.micro has none
+    assert forms["power:us-east-1:i-0eph0000000000003"]["confirm"]["words"].endswith("a reboot keeps it running, billed as it is.")
     tables = {t["title"]: t for t in p.status()["tables"]}
     buttons = [r[-1] for r in tables["Instances"]["rows"]]
     assert {b["form"] for b in buttons} == {k for k in forms if k.startswith("power:")} and all(b["title"] == "Power…" for b in buttons)
@@ -102,6 +109,9 @@ def test_power_sends_start_stop_and_reboot_and_asks_twice_before_a_stop_that_los
     assert "a minute at least" in rep["lines"][0]
     # db (m5d.large) has an instance store: its stop is refused until accepted, nothing sent first
     fake.account["us-east-1"]["instances"][1]["state"] = "running"
+    p.refresh()  # running now: its Power… offers a stop, whose words say what a stop erases
+    assert ("its type's instance store volumes are erased by a stop (you are asked again first)"
+            in forms_of(p)["power:us-east-1:i-0db00000000000002"]["confirm"]["words"])
     calls = len(fake.requests)
     with pytest.raises(Refusal, match=r"instance store volumes \(75 GB\): a stop erases their data") as refused:
         ask(p, db, {"action": "stop"})

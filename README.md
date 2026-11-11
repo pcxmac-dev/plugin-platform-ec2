@@ -42,7 +42,9 @@ page then asks a second, explicit time.
 - **Power…** on each instance: **Start**, **Stop** (a graceful shutdown), **Reboot**, and **Force stop** (for one stuck
   in stopping: its file systems are not flushed). A forced stop, and the stop of an instance whose type has instance
   store volumes (a stop erases their data), are asked twice. An instance store-backed instance cannot be stopped at all
-  (AWS only reboots it). Each one is read afresh before it is changed.
+  (AWS only reboots it). Each one is read afresh before it is changed. A start is asked once, its confirmation saying
+  that the instance's compute charge resumes once it runs, beside the charges that never stopped (its EBS volumes and
+  Elastic IPs).
 - **Authorize an inbound rule…** (a security group, a protocol, ports, a source address range, a description) and a
   **Revoke** on each inbound rule (by its rule ID, read afresh first). A rule opening SSH (22), RDP (3389) or every port
   to the whole internet (0.0.0.0/0, ::/0), and the revoke of the last rule letting SSH in to an instance, are asked twice.
@@ -58,9 +60,10 @@ page then asks a second, explicit time.
 
 ## What it never does
 
-Nothing that starts a charge: no instance is launched, resized or ended, no volume, snapshot, image, Elastic IP,
+Nothing that makes a billable thing: no instance is launched, resized or ended, no volume, snapshot, image, Elastic IP,
 hosted zone or health check is made, no domain registered. Its clients' sources do not even name those calls (a test
-checks): only its API card does, to say what the API offers. It never asks **Cost Explorer**, each of whose requests
+checks): only its API card does, to say what the API offers. The one change that bills is a start, which resumes a
+stopped instance's compute charge (the card marks StartInstances so, and the confirmation says it). It never asks **Cost Explorer**, each of whose requests
 costs money. It never reads `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_PROFILE` or `~/.aws`: those are other
 tools', and its own variables carry its name.
 

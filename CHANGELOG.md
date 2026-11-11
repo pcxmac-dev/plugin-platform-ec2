@@ -20,8 +20,10 @@ should reflect the the API its attached to, and present links that provide docum
 - Route 53's API (2013-04-01): the hosted zones and each one's record sets (at most 20 zones a refresh);
 - EC2's API gives no prices: the page links the pricing pages, and says that a stopped EBS-backed instance stops its
   compute charge while its EBS volumes and Elastic IPs still bill; Cost Explorer, whose requests cost, is never asked;
-- free changes only, each a form the platform's page confirms: start, stop and reboot (a forced stop, or the stop of an
-  instance whose type has an instance store, asked twice; an instance store-backed instance never stopped); an inbound
+- free changes only, each a form the platform's page confirms: start, stop and reboot (a start asked once, its
+  confirmation saying the compute charge resumes once it runs beside the volumes and Elastic IPs that never stopped
+  billing, StartInstances marked as costing on the card; a forced stop, or the stop of an instance whose type has an
+  instance store, asked twice; an instance store-backed instance never stopped); an inbound
   rule authorized or revoked by its ID (one opening SSH, RDP or every port to the whole internet, or the last one letting
   SSH in to an instance, asked twice); a public key imported, a key pair deleted; a Route 53 record set or removed, one
   record set a change (an UPSERT, or a DELETE naming the set exactly), every other record of the zone untouched, the

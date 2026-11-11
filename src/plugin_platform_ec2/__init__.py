@@ -6,9 +6,10 @@ and records; and the changes that cost nothing, each confirmed on the platform's
 record set a change, every other record of the zone untouched; an inbound security group rule authorized or revoked (one
 opening SSH, RDP or every port to the whole internet, or the last one letting SSH in to an instance, asked twice); a public
 key imported or a key pair deleted. Dynamic DNS keeps hosts of the account's public zones at this network's address (an
-UPSERT of the host's A record). Nothing that starts a charge: no instance launched, resized or ended, no volume, snapshot,
-image, address or zone made. EC2's API gives no prices: the page links the pricing pages, and says that a stopped
-EBS-backed instance stops its compute charge while its EBS volumes and Elastic IPs still bill.
+UPSERT of the host's A record). Nothing that makes a billable thing: no instance launched, resized or ended, no volume,
+snapshot, image, address or zone made; a start resumes a stopped instance's compute charge, and its confirmation says so.
+EC2's API gives no prices: the page links the pricing pages, and says that a stopped EBS-backed instance stops its compute
+charge while its EBS volumes and Elastic IPs still bill.
 
 Its settings are pairs asked of the login of the app it is attached to (settings.py: EC2_ACCESS_KEY_ID,
 EC2_SECRET_ACCESS_KEY, EC2_SESSION_TOKEN, EC2_REGIONS, EC2_DDNS_HOSTS, EC2_DDNS_MINUTES), never a file, never AWS_*. While
@@ -65,6 +66,9 @@ IAM_ACTIONS = (*(f"ec2:{a}" for a in (*ec2_mod.READS, *ec2_mod.WRITES)), *(f"rou
 IAM_WORDS = ("ec2: " + ", ".join(ec2_mod.READS) + " (reads); " + ", ".join(ec2_mod.WRITES) + " (free changes) · route53: "
              + ", ".join(r53.READS) + " (reads); " + ", ".join(r53.WRITES) + " (records)")
 BILLING = "a stopped EBS-backed instance stops its compute charge; its EBS volumes and Elastic IPs still bill"
+START_WORDS = ("once it runs, its compute charge resumes (by the second, a minute at least each start), beside the charges "
+               "that never stopped: its EBS volumes and Elastic IPs")
+STOP_WORDS = "stopped, an EBS-backed instance stops its compute charge; its EBS volumes and Elastic IPs still bill"
 POWER = {"start": "Start", "stop": "Stop (a graceful shutdown)", "reboot": "Reboot",
          "force-stop": "Force stop (without flushing its file systems)"}
 PROTOCOL_CHOICES = (("tcp", "TCP"), ("udp", "UDP"), ("icmp", "ICMP"), ("icmpv6", "ICMPv6"), ("-1", "Every protocol"))
@@ -462,7 +466,8 @@ class Ec2Plugin(MachinePlugin):
             if state != "stopped":
                 raise Refusal(f"{label} is {state}: only a stopped instance is started")
             done = api.start(region, inst["id"])
-            lines.append("it bills by the second from now (a minute at least); its public IPv4 address is a new one "
+            lines.append("once it runs its compute charge resumes, by the second (a minute at least), beside the charges "
+                         "that never stopped (its EBS volumes and Elastic IPs); its public IPv4 address is a new one "
                          "unless it holds an Elastic IP")
         elif act == "reboot":
             if state != "running":
@@ -1187,8 +1192,14 @@ class Ec2Plugin(MachinePlugin):
             choices = [c for c in choices if c == "reboot"] or ["reboot"]
         kind = r.types.get(i["type"], {})
         label = i["name"] or i["id"]
-        store = (" Its type has instance store volumes: a stop erases their data, and you are asked again first."
-                 if kind.get("instanceStore") else "")
+        said = []
+        if "start" in choices:
+            said.append(START_WORDS)
+        if "stop" in choices or "force-stop" in choices:
+            said.append(STOP_WORDS + ("; its type's instance store volumes are erased by a stop (you are asked again "
+                                      "first)" if kind.get("instanceStore") else ""))
+        if choices == ["reboot"]:
+            said.append("a reboot keeps it running, billed as it is")
         return {"id": f"power:{r.name}:{i['id']}", "hook": "power", "title": f"Power: {label}",
                 "note": f"{label} is {state} in {r.name} ({i['type']}).",
                 "fields": [{"name": "region", "label": "Region", "type": "fixed", "value": r.name},
@@ -1200,9 +1211,7 @@ class Ec2Plugin(MachinePlugin):
                                       "a stop, and a forced stop does not flush the file systems.")}],
                 "submit": "Review",
                 "confirm": {"title": f"{label}: {{action}}?",
-                            "words": ("{action} " + f"{label} in {r.name}. Stopped, an EBS-backed instance stops its "
-                                      "compute charge; its EBS volumes and Elastic IPs still bill. Each start bills a "
-                                      "minute at least." + store),
+                            "words": "{action} " + f"{label} in {r.name}: " + "; ".join(said) + ".",
                             "yes": "Do it", "danger": state == "running"}}
 
     @staticmethod

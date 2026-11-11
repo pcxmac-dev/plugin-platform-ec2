@@ -198,8 +198,9 @@ EC2_API = Api(
         _call("DescribeSnapshots", "EBS snapshots (Owner self: the account's own)", "EBS snapshots",
               used="the snapshots counted per region"),
         _call("DescribeImages", "AMIs (Owner self: the account's own)", "AMIs", used="the AMIs counted per region"),
-        _call("StartInstances", "starts stopped EBS-backed instances (each start bills a minute at least)", "Instances",
-              used="Power… > Start", writes=True),
+        _call("StartInstances", ("starts stopped EBS-backed instances: starts the compute charge again (by the second, a "
+                                 "minute at least each start)"), "Instances",
+              used="Power… > Start (its confirmation says the compute charge resumes)", writes=True, costs=True),
         _call("StopInstances", "stops EBS-backed instances (Force: without the file systems flushed)", "Instances",
               used="Power… > Stop; Force stop only when asked twice", writes=True),
         _call("RebootInstances", "reboots instances (a hard reboot if the OS does not shut down)", "Instances",

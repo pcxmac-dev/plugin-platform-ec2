@@ -5,7 +5,8 @@ server's trouble), a change a POST of a form (never sent twice).
 
 It makes the reads in READS and the free changes in WRITES and no other action (`call` refuses one): power on, stop
 (gracefully, or forced when asked twice), reboot; an inbound rule authorized or revoked; a key pair imported or deleted.
-Nothing here starts a charge: no instance is launched or ended, no volume, snapshot, image or address made."""
+Nothing here makes a billable thing: no instance is launched or ended, no volume, snapshot, image or address made (a start
+resumes a stopped instance's compute charge: the one change here that bills, said when it is confirmed)."""
 from __future__ import annotations
 
 import base64
