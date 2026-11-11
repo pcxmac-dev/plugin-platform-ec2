@@ -955,7 +955,7 @@ class Ec2Plugin(MachinePlugin):
     @property
     def reading(self) -> bool:
         """Whether it reads in the background: attached by the platform (its app's NAME), and only then."""
-        return self.app is not None and getattr(self.app, "NAME", "") == "platform"
+        return self.app is not None and getattr(self.app, "NAME", "") == "platform" and not getattr(self.app, "once", False)  # never a one-shot command's
 
     def detach(self) -> None:
         """Detached (the platform ending, the plugin disabled or not valid): the background reading ends."""

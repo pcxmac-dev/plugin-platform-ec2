@@ -31,6 +31,8 @@ platform code: an audit before 8780's restart"; eight reviewers, a skeptic per f
   change with its arguments: liminal-platform 0.20.1 logs a change without its values; the plugin still refuses the key
   without saying it back.
 
+The platform's one-shot commands (status, machine: `PlatformApp.once`, liminal-platform 0.20.1) start none of its background work.
+
 ## 0.1.0 (2026-11-11)
 
 The first release (the user: "lets roll plugins for EC2, vultr, azure and google cloud"; "Free changes only"; "each plugin

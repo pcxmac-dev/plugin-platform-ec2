@@ -309,3 +309,16 @@ def test_the_command_line_reads_and_asks_yes_before_a_change(made, env):
     assert cli.main(["status"], plugin=p, out=said.append) == 0 and json.loads(said[-1])["valid"] is True
     assert cli.main(["records", "nowhere.example"], plugin=p, out=said.append, err=told.append) == 1
     assert told[-1].startswith("refused: 'nowhere.example' is none of the account's hosted zones")
+
+
+def test_the_platforms_one_shot_command_starts_nothing(made, env):
+    """The platform's status and machine commands attach it to answer and end (PlatformApp.once, liminal-platform
+    0.20.1): nothing of it runs on its own then."""
+    env(settings_of(ddns=True))
+    p, fake = made()
+    p.attach(type("Once", (), {"NAME": "platform", "once": True})(), Pairs(settings_of(ddns=True)))
+    try:
+        time.sleep(0.1)
+        assert not p.working and fake.requests == []
+    finally:
+        p.detach()
