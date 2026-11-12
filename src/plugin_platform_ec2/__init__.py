@@ -23,7 +23,6 @@ in a thread of its own; detached, nothing of it runs. Its status is what was rea
 """
 from __future__ import annotations
 
-import json
 import os
 import re
 import threading
@@ -45,7 +44,7 @@ from .route53 import ChangeInfo, RecordSet, Route53Api, Zone
 from .settings import ACCESS_KEY, DDNS_HOSTS, IAM_CONSOLE, KEYS, NAMES, REGIONS, SECRET_KEY, Config
 from .sigv4 import Signer
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 REFRESH_S = 900.0  # the account read again at most this often while attached (or by Refresh)
 REGIONS_S = 86400.0  # the regions enabled for the account asked again after a day
 CONFIG_S = 30.0  # the settings asked of the login again after this long
@@ -229,11 +228,12 @@ class Ec2Plugin(MachinePlugin):
               "2); Route 53: 50 requests at once and 10 a second for the account")
     apis = APIS
 
-    def __init__(self, transport=None, public=None, clock=None, sleep=None, folder: Path | None = None):
+    def __init__(self, transport=None, public=None, clock=None, sleep=None, folder: Path | None = None, pace_clock=None):
         self._transport = transport  # (method, url, headers, body, timeout) -> (status, headers, body): a test's
         self._public = public  # () -> (address, whose): a test's stand-in for asking DNS this network's address
         self._clock = clock or time.time
         self._sleep = sleep  # how a client waits out a rate limit and spaces Route 53's requests (a test's: no wait)
+        self._pace_clock = pace_clock  # what Route 53's spacing is reckoned by (a test's; else time.monotonic)
         self._folder = Path(folder) if folder is not None else None  # its folder (a test's), else the platform's ec2/
         self._rt = _Runtime()
 
@@ -284,7 +284,8 @@ class Ec2Plugin(MachinePlugin):
             options["sleep"] = self._sleep
         made = (cfg.api_print, Ec2Api(AwsClient(ec2_mod.endpoint(ec2_mod.HOME_REGION), signer=signer, **options)),
                 Route53Api(AwsClient(r53.BASE, signer=signer, throttled=route53_throttled, **options),
-                           **({"sleep": self._sleep} if self._sleep is not None else {})))
+                           **({"sleep": self._sleep} if self._sleep is not None else {}),
+                           **({"clock": self._pace_clock} if self._pace_clock is not None else {})))
         with self._rt.lock:
             self._rt.clients = made
         return made[1], made[2]
@@ -373,6 +374,8 @@ class Ec2Plugin(MachinePlugin):
             rt.reads, rt.zones, rt.zones_error, rt.records, rt.refreshed_at = reads, zones, zones_error, records, now
             rt.account = account or rt.account
             rt.api_ok, rt.api_error, rt.api_error_at, rt.api_print = True, "", None, cfg.api_print
+        if zones is not None:
+            self._settle(cfg)  # the zones read: a host taken out of the setting is let go
         return {"regions": len(regions), "instances": sum(len(r.instances) for r in reads.values()),
                 "zones": len(zones or []), "refreshedAt": when(now)}
 
@@ -862,19 +865,15 @@ class Ec2Plugin(MachinePlugin):
             return [], []
         return hosts_of(cfg.hosts, [z.name for z in zones if not z.private])
 
-    def _let_go(self, cfg: Config) -> None:
-        """The hosts taken out of EC2_DDNS_HOSTS are no longer the keeper's (neither its own nor taken over), whatever
-        zones are read: those it holds in its state file and those it kept in this run."""
-        keeper = self.keeper()
-        wanted = host_names(cfg.hosts)
-        held: set[str] = {s.fqdn for s in keeper.states()}
-        try:
-            data = json.loads((self.folder / "ddns.json").read_text(encoding="utf-8"))
-            held |= {str(k).lower() for k in (data.get("own") or {})} | {str(x).lower() for x in (data.get("taken") or [])}
-        except (OSError, ValueError, AttributeError):
-            pass
-        for fqdn in sorted(held - wanted):
-            keeper.let_go(fqdn)
+    def _settle(self, cfg: Config) -> list[str]:
+        """Every host the keeper holds (its own, or taken over: in its ddns.json too, so a change made while the plugin
+        did not run counts) that EC2_DDNS_HOSTS no longer names is let go (Keeper.settle, liminal-libs 1.49.7): asked with
+        the whole setting, and only once the account's zones are read, never with a list cut short by unread zones."""
+        with self._rt.lock:
+            read = self._rt.zones is not None
+        if not read:
+            return []
+        return self.keeper().settle(sorted(host_names(cfg.hosts)))
 
     def _ddns_ready(self) -> tuple[Config, list[Host]]:
         cfg = self.config(fresh=True)
@@ -889,7 +888,7 @@ class Ec2Plugin(MachinePlugin):
         hosts, wrong = self.ddns_hosts(cfg)
         if not hosts:
             raise ValueError("no Dynamic DNS host is in a public zone of the account: " + ("; ".join(wrong) or DDNS_HOSTS))
-        self._let_go(cfg)
+        self._settle(cfg)
         return cfg, hosts
 
     def ddns_update(self, force: bool = True) -> list[dict]:
@@ -902,21 +901,26 @@ class Ec2Plugin(MachinePlugin):
             self._rt.ddns_print, self._rt.ddns_at = cfg.ddns_print, self._clock()
         return out
 
-    def ddns_take_over(self, host: str, holds: str | None = None) -> dict:
-        """A host holding another address taken over (the page's Take over…, once confirmed: `holds`, what its record
-        held as the confirmation said), then a pass for it: its A record set to this network's address. Refused, nothing
-        changed, when the record holds something else by now."""
+    def ddns_take_over(self, host: str, holds: str | None = None, accept_take_over: bool = False) -> dict:
+        """A host holding another address taken over (the page's Take over…, asked twice: `holds`, what its record held
+        as the confirmation said; `accept_take_over`, exactly True, the second confirmation, since what it holds is
+        dropped at once), then a pass for it: its A record set to this network's address. Its record is read afresh
+        first; refused, nothing changed, when it holds something else by now, and a TakeOverRefused (naming
+        accept_take_over) until the second confirmation."""
         cfg, hosts = self._ddns_ready()
         name = str(host or "").strip().rstrip(".").lower()
         found = next((h for h in hosts if h.fqdn == name), None)
         if found is None:
             raise ValueError(f"{host!r} is none of the Dynamic DNS hosts set ({DDNS_HOSTS})")
         keeper = self.keeper()
+        keeper.run_pass([found], force=False)  # what it holds now (a write only where the record is the keeper's own)
         st = keeper.state(found.fqdn)
-        now = ", ".join(st.holds) if st is not None else ""
-        if holds is not None and now and str(holds).strip() != now:
+        if st is None or not st.foreign:  # its own (current or set now), or not readable: nothing to take over
+            return st.describe() if st is not None else {"host": found.fqdn, "result": "not read"}
+        now = ", ".join(st.holds)
+        if holds is not None and str(holds).strip() != now:
             raise Refusal(f"{found.fqdn} holds {now} now, not {holds} as confirmed: look again before taking it over")
-        keeper.take_over(found.fqdn)
+        keeper.take_over(found.fqdn, accept=accept_take_over, holds=now)  # TakeOverRefused unless exactly True
         out = keeper.run_pass([found], force=False)
         with self._rt.lock:
             self._rt.ddns_print, self._rt.ddns_at = cfg.ddns_print, self._clock()
@@ -1016,7 +1020,7 @@ class Ec2Plugin(MachinePlugin):
                     hosts, _ = self.ddns_hosts(cfg)
                     if hosts:
                         try:
-                            self._let_go(cfg)
+                            self._settle(cfg)  # the zones read (hosts found in them): the whole setting known
                             self.keeper().run_pass(hosts, force=False, wait=0.5, stop=stop)  # ends before a write once detached
                             with self._rt.lock:
                                 self._rt.ddns_print, self._rt.ddns_at = cfg.ddns_print, self._clock()

@@ -206,20 +206,23 @@ def ttl_of(value) -> int:
 class Route53Api:
     """Route 53 through one client (route53.amazonaws.com)."""
 
-    def __init__(self, client: AwsClient, sleep=time.sleep, spacing: float = SPACING_S):
+    def __init__(self, client: AwsClient, sleep=time.sleep, spacing: float = SPACING_S, clock=time.monotonic):
         self.client = client
         self._sleep = sleep
         self._spacing = max(0.0, float(spacing))
+        self._clock = clock  # what the spacing is reckoned by (a test's own: no wall time involved)
         self._lock = threading.Lock()
-        self._last = 0.0
+        self._last: float | None = None
 
     def _paced(self) -> None:
-        """Waits until SPACING_S has passed since its last request (the requests of every thread spaced alike)."""
+        """Waits until SPACING_S has passed since its last request (the requests of every thread spaced alike); the first
+        is sent at once."""
         with self._lock:
-            wait = self._last + self._spacing - time.monotonic()
-            if wait > 0:
-                self._sleep(wait)
-            self._last = time.monotonic()
+            if self._last is not None:
+                wait = self._last + self._spacing - self._clock()
+                if wait > 0:
+                    self._sleep(wait)
+            self._last = self._clock()
 
     def _get(self, action: str, path: str, params: dict | None = None):
         url = f"{BASE}{path}" + (("?" + query(params)) if params else "")

@@ -11,6 +11,7 @@ import threading
 import pytest
 
 from conftest import HOME, ZONE, FakeAws, Public, settings_of
+from liminal_libs.machines.ddns import TakeOverRefused
 from plugin_platform_ec2 import Refusal
 from test_forms import change_of, page_args
 
@@ -51,9 +52,11 @@ def test_take_over_then_a_pass_sets_it(made, env):
     take = next(f for f in p.status()["forms"] if f["id"] == "ddns-take")
     calls = len(fake.requests)
     with pytest.raises(Refusal, match="holds 198.51.100.20 now, not 203.0.113.1 as confirmed"):
-        p.ddns_take_over("home.example.com", "203.0.113.1")  # what was confirmed is no longer what it holds
+        p.ddns_take_over("home.example.com", "203.0.113.1", True)  # what was confirmed is no longer what it holds
     assert "ChangeResourceRecordSets" not in fake.actions()[calls:]
-    done = p.ask("ddns_take_over", *page_args(take, {"host": "home.example.com", "holds": "198.51.100.20"}))
+    assert [x["name"] for x in take["fields"]] == ["host", "holds", "accept_take_over"]  # the hook's arguments, in order
+    values = {"host": "home.example.com", "holds": "198.51.100.20"}
+    done = p.ask("ddns_take_over", *page_args(take, values, accepted={"accept_take_over"}))
     assert done["ok"] and done["result"] == "set (pending) (was 198.51.100.20)"
     assert change_of(fake) == [("UPSERT", "home.example.com.", "A", "60", [HOME])]  # exactly one address, its TTL kept
     calls = len(fake.requests)
@@ -121,3 +124,64 @@ def test_a_host_outside_the_public_zones_is_said_and_an_alias_never_written_over
     [none] = p2.ddns_update(force=True)
     assert none["ok"] is False and "this network's address was not found" in none["result"]
     assert "ChangeResourceRecordSets" not in fake2.actions()
+
+
+def test_take_over_is_asked_twice_and_counts_only_when_exactly_true(made, env):
+    """Taking over sets the record at once and drops what it holds: refused, naming accept_take_over (the page's second
+    confirmation), and nothing taken, until it is exactly True; "true", 1 or "yes" are refused like a missing one."""
+    env(settings_of(ddns=True, EC2_REGIONS="us-east-1"))
+    p, fake = made()
+    p.ddns_update(force=False)
+    keeper = p.keeper()
+    for value in (False, "true", 1, "yes", None):
+        with pytest.raises(TakeOverRefused) as refused:
+            p.ddns_take_over("home.example.com", "198.51.100.20", value)
+        assert refused.value.accept == "accept_take_over" and "198.51.100.20" in str(refused.value)
+        assert not keeper.taken("home.example.com")
+    assert "ChangeResourceRecordSets" not in fake.actions()
+    done = p.ddns_take_over("home.example.com", "198.51.100.20", True)
+    assert keeper.taken("home.example.com") and done["ok"] and done["result"] == "set (pending) (was 198.51.100.20)"
+    assert change_of(fake) == [("UPSERT", "home.example.com.", "A", "60", [HOME])]
+
+
+def test_a_host_taken_over_then_out_of_the_setting_is_let_go_and_left_as_it_is_when_put_back(made, env, tmp_path):
+    env(settings_of(ddns=True, EC2_REGIONS="us-east-1"))
+    public = Public(HOME)
+    p, fake = made(public=public)
+    p.ddns_update(force=False)
+    p.ddns_take_over("home.example.com", "198.51.100.20", True)  # taken over: pointed here, its own
+    keeper = p.keeper()
+    assert keeper.known() == ["home.example.com"]
+    env({"EC2_DDNS_HOSTS": "nas.example.com"})  # taken out of the setting
+    p.settings_changed()
+    p.refresh()  # the next read (its zones read): let go
+    assert keeper.known() == [] and not keeper.taken("home.example.com") and keeper.own("home.example.com") is None
+    state = json.loads((tmp_path / "ec2" / "ddns.json").read_text(encoding="utf-8"))
+    assert state == {"own": {}, "taken": []}
+    # put back once this network moved on: the record holds the old address, no longer its own, so it is left as it is
+    public.address = NEW
+    env({"EC2_DDNS_HOSTS": "home.example.com"})
+    p.settings_changed()
+    calls = len(fake.requests)
+    [back] = p.ddns_update(force=True)  # the address asked afresh (Update DNS now); still never written over
+    assert back["foreign"] is True and back["result"].startswith(f"holds {HOME}, not this network's address: left as it is")
+    assert "ChangeResourceRecordSets" not in fake.actions()[calls:]
+    p.refresh()
+    row = next(t for t in p.status()["tables"] if t["title"] == "Dynamic DNS")["rows"][0]
+    assert row[-1]["form"] == "ddns-take" and row[-1]["values"] == {"host": "home.example.com", "holds": HOME}
+
+
+def test_the_keeper_is_settled_only_once_the_zones_are_read(made, env):
+    """Never with a list cut short by unread zones: a refresh whose zones could not be read lets nothing go."""
+    env(settings_of(ddns=True, EC2_REGIONS="us-east-1"))
+    p, fake = made()
+    p.ddns_update(force=False)
+    p.ddns_take_over("home.example.com", "198.51.100.20", True)
+    env({"EC2_DDNS_HOSTS": ""})
+    p.settings_changed()
+    fake.fail["ListHostedZones"] = (403, "AccessDenied", "not authorized to perform: route53:ListHostedZones")
+    p.refresh()
+    assert p.keeper().known() == ["home.example.com"]  # the zones unread: kept
+    del fake.fail["ListHostedZones"]
+    p.refresh()
+    assert p.keeper().known() == []  # read, and the setting holds it no more: let go

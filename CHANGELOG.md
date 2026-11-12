@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.1.2 (2026-11-11)
+
+The re-verification of the audit's fixes (liminal-libs 1.49.7): its two Dynamic DNS should-fix items. Needs
+liminal-libs>=1.49.7.
+
+- **Take over… is asked twice**: it sets the record at once and drops every address it holds, so one yes is not
+  enough. `ddns_take_over(host, holds, accept_take_over)` reads the record afresh, refuses (nothing changed) when it holds
+  something else than the confirmation showed, then passes `accept_take_over` to `Keeper.take_over`, whose refusal names
+  it until it is exactly True (the page's second confirmation: its take form's third field); "true", 1 or "yes" are
+  refused like a missing one.
+- **A host taken out of the setting is let go, whether the plugin ran or not**: `Keeper.settle` with the whole of
+  EC2_DDNS_HOSTS, in the background pass, the refresh and the page's Dynamic DNS hooks, and only once the account's
+  zones are read (never a list cut short by unread zones). It replaces the plugin's own reading of ddns.json. A host put
+  back later is left as it is, its row offering Take over… again.
+- Route 53's request spacing is reckoned by a clock that can be given (`Ec2Plugin(pace_clock=)`, `Route53Api(clock=)`),
+  and its first request goes at once: the spacing test runs on a clock of its own, no wall time involved (it failed on
+  GitHub's windows-latest with Python 3.12, where the wall clock made the wait 0 or over 0.15 s).
+
 ## 0.1.1 (2026-11-11)
 
 What the audit of the six cloud plugins found before any key went in (session 87405e6a, "the cloud plugins and today's

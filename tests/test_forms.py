@@ -421,17 +421,28 @@ def test_the_last_rule_letting_rdp_in_to_a_windows_instance_is_asked_twice_over_
 
 
 def test_route53s_throttling_is_waited_out_and_its_requests_spaced(env, tmp_path):
+    """On a clock of the test's own (it moves only when the plugin sleeps: no wall time, so the same on every runner),
+    a throttle is waited out and asked again, and each Route 53 request is spaced 0.15 s from the last."""
     from plugin_platform_ec2 import Ec2Plugin
+    from plugin_platform_ec2.route53 import SPACING_S
 
     env(settings_of(EC2_REGIONS="us-east-1"))
     fake = FakeAws()
     fake.throttle = 1  # ListHostedZones answered HTTP 400 Throttling once
-    slept = []
-    p = Ec2Plugin(transport=fake, public=lambda: ("93.184.216.34", "OpenDNS"), sleep=slept.append, folder=tmp_path / "ec2")
-    zones = p.domains()
+    now, slept = [1000.0], []
+
+    def sleep(seconds):
+        slept.append(round(seconds, 6))
+        now[0] += seconds
+
+    p = Ec2Plugin(transport=fake, public=lambda: ("93.184.216.34", "OpenDNS"), sleep=sleep, folder=tmp_path / "ec2",
+                  pace_clock=lambda: now[0])
+    zones = p.domains()  # the first request at once; throttled: the client's backoff (2 s), then asked again
     assert [z["id"] for z in zones] == [ZONE, PRIVATE] and fake.actions().count("ListHostedZones") == 2
-    assert max(slept) >= 1.0  # the throttle waited out (the client's backoff), the request asked again
+    assert slept == [2.0]
     _, api = p.clients()
-    api.records(ZONE)
-    api.records(PRIVATE)
-    assert any(0 < s <= 0.15 for s in slept)  # each request spaced from the last (Route 53: 10 a second)
+    api.records(ZONE)  # 2 s since the last: no wait
+    api.records(PRIVATE)  # at once after the last: spaced
+    api.get_change("C2682N5HXP0BZ4")
+    assert slept == [2.0, SPACING_S, SPACING_S] and SPACING_S == 0.15  # Route 53 refills 10 a second
+    assert fake.actions()[-3:] == ["ListResourceRecordSets", "ListResourceRecordSets", "GetChange"]

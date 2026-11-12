@@ -154,11 +154,14 @@ This network's public IPv4 address is asked of DNS (`myip.opendns.com` of OpenDN
 (ListResourceRecordSets). It changes only what is its own (liminal-libs' Keeper): a host with no A record is made, and
 one already pointing at this network, or at the address it set last, is kept current with an `UPSERT` of that one
 record set to exactly one address (ChangeResourceRecordSets), keeping its TTL (300 s for one it makes). A host holding
-another address, or several, is left as it is and said so, with a **Take over…** on its row: taken over (confirmed,
-naming what it holds and that whatever answers there stops answering), it is pointed here on the next pass. Several
+another address, or several, is left as it is and said so, with a **Take over…** on its row: taken over (asked twice,
+naming what it holds and that whatever answers there stops answering; its record read afresh first), it is pointed
+here at once. Several
 addresses are never cut to one unasked. Just before a write the address is asked again, so a stale one is never written
 back. What is its own is kept in the platform's folder (`LIMINAL_PLATFORM_DIR`, else the data folder's `platform/`),
-`ec2/ddns.json`, so it is known after a restart; a host taken out of `EC2_DDNS_HOSTS` is let go. **Update DNS now** is
+`ec2/ddns.json`, so it is known after a restart; a host taken out of `EC2_DDNS_HOSTS` is let go by the next pass or
+refresh once the zones are read, whether the plugin ran meanwhile or not (put back, it is left as it is until taken over
+again). **Update DNS now** is
 confirmed first, and sets its own hosts whatever they hold. A host in no public zone of the account is said, a private
 zone is never used, and an alias or routing policy A record is never written over.
 
@@ -198,7 +201,8 @@ while it ran (the requests made, the last answer, the account, the regions) is i
 `authorize_ingress(group, protocol, ports, source, description=None, accept_open=False)`,
 `revoke_ingress(group, rule, accept_lockout=False)`, `import_key(region, name, public_key)`,
 `delete_key(region, key, name=None)`, `set_record(zone, name, rtype, value, ttl=None, how=None)`,
-`remove_record(zone, name, rtype, value)`, `ddns_update(force=True)`, `ddns_take_over(host, holds=None)`;
+`remove_record(zone, name, rtype, value)`, `ddns_update(force=True)`,
+`ddns_take_over(host, holds=None, accept_take_over=False)`;
 `power` takes `accept_costs=False` after `accept_data_loss` too. A refusal names the argument that accepts it
 (`Refusal.accept`), which the page asks as its second confirmation.
 
