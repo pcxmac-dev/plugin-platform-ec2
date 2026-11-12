@@ -160,7 +160,7 @@ def test_a_host_taken_over_then_out_of_the_setting_is_let_go_and_left_as_it_is_w
     p.refresh()  # the next read (its zones read): let go
     assert keeper.known() == [] and not keeper.taken("home.example.com") and keeper.own("home.example.com") is None
     state = json.loads((tmp_path / "ec2" / "ddns.json").read_text(encoding="utf-8"))
-    assert state == {"own": {}, "taken": []}
+    assert state == {"own": {}, "taken": {}}
     # put back once this network moved on: the record holds the old address, no longer its own, so it is left as it is
     public.address = NEW
     env({"EC2_DDNS_HOSTS": "home.example.com"})
