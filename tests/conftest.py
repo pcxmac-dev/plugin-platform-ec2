@@ -588,6 +588,19 @@ class PlatformApp:
     NAME = "platform"
 
 
+class OneShotPlatform(PlatformApp):
+    """The platform run for one command (`once`): it starts nothing, and settles nothing."""
+
+    once = True
+
+
+def serving(p, app=None):
+    """The plugin under a stand-in serving platform (what settles Dynamic DNS's hosts), its reading in the background not
+    started: its app set as attaching would set it."""
+    object.__setattr__(p, "app", app or PlatformApp())
+    return p
+
+
 @pytest.fixture
 def made(tmp_path):
     """A plugin over the stand-ins: (plugin, fake AWS); its folder (Dynamic DNS's ddns.json) the test's own."""

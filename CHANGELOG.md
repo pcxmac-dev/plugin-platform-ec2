@@ -3,7 +3,7 @@
 ## 0.1.2 (2026-11-11)
 
 The re-verification of the audit's fixes (liminal-libs 1.49.7): its two Dynamic DNS should-fix items. Needs
-liminal-libs>=1.49.7.
+liminal-libs>=1.49.8.
 
 - **Take over… is asked twice**: it sets the record at once and drops every address it holds, so one yes is not
   enough. `ddns_take_over(host, holds, accept_take_over)` reads the record afresh, refuses (nothing changed) when it holds
@@ -17,6 +17,9 @@ liminal-libs>=1.49.7.
 - Route 53's request spacing is reckoned by a clock that can be given (`Ec2Plugin(pace_clock=)`, `Route53Api(clock=)`),
   and its first request goes at once: the spacing test runs on a clock of its own, no wall time involved (it failed on
   GitHub's windows-latest with Python 3.12, where the wall clock made the wait 0 or over 0.15 s).
+- The third round's check (liminal-libs 1.49.8): a take-over is single-use, used up once its write lands (the host is
+  the keeper's own from then on), and only the serving platform settles: the plugin's own command line, or a one-shot
+  platform command, run from a shell whose setting may lack EC2_DDNS_HOSTS, never empties the shared ddns.json.
 
 ## 0.1.1 (2026-11-11)
 

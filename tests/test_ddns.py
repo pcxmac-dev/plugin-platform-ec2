@@ -10,7 +10,7 @@ import threading
 
 import pytest
 
-from conftest import HOME, ZONE, FakeAws, Public, settings_of
+from conftest import HOME, ZONE, FakeAws, OneShotPlatform, Public, serving, settings_of
 from liminal_libs.machines.ddns import TakeOverRefused
 from plugin_platform_ec2 import Refusal
 from test_forms import change_of, page_args
@@ -90,7 +90,8 @@ def test_its_own_old_address_is_updated_after_the_networks_address_changed(made,
     [moved] = p2.ddns_update(force=False)
     assert moved["ok"] and moved["result"] == f"set (pending) (was {HOME})"
     assert change_of(fake) == [("UPSERT", "nas.example.com.", "A", "300", [NEW])]
-    # a host taken out of the settings is let go: no longer its own
+    # a host taken out of the settings is let go by the serving platform: no longer its own
+    serving(p2)
     env({"EC2_DDNS_HOSTS": "home.example.com"})
     p2.settings_changed()
     p2.ddns_update(force=False)
@@ -140,7 +141,8 @@ def test_take_over_is_asked_twice_and_counts_only_when_exactly_true(made, env):
         assert not keeper.taken("home.example.com")
     assert "ChangeResourceRecordSets" not in fake.actions()
     done = p.ddns_take_over("home.example.com", "198.51.100.20", True)
-    assert keeper.taken("home.example.com") and done["ok"] and done["result"] == "set (pending) (was 198.51.100.20)"
+    assert done["ok"] and done["result"] == "set (pending) (was 198.51.100.20)"
+    assert keeper.own("home.example.com") == HOME and not keeper.taken("home.example.com")  # single-use: its own now
     assert change_of(fake) == [("UPSERT", "home.example.com.", "A", "60", [HOME])]
 
 
@@ -148,6 +150,7 @@ def test_a_host_taken_over_then_out_of_the_setting_is_let_go_and_left_as_it_is_w
     env(settings_of(ddns=True, EC2_REGIONS="us-east-1"))
     public = Public(HOME)
     p, fake = made(public=public)
+    serving(p)  # the serving platform: what settles
     p.ddns_update(force=False)
     p.ddns_take_over("home.example.com", "198.51.100.20", True)  # taken over: pointed here, its own
     keeper = p.keeper()
@@ -175,6 +178,7 @@ def test_the_keeper_is_settled_only_once_the_zones_are_read(made, env):
     """Never with a list cut short by unread zones: a refresh whose zones could not be read lets nothing go."""
     env(settings_of(ddns=True, EC2_REGIONS="us-east-1"))
     p, fake = made()
+    serving(p)
     p.ddns_update(force=False)
     p.ddns_take_over("home.example.com", "198.51.100.20", True)
     env({"EC2_DDNS_HOSTS": ""})
@@ -185,3 +189,25 @@ def test_the_keeper_is_settled_only_once_the_zones_are_read(made, env):
     del fake.fail["ListHostedZones"]
     p.refresh()
     assert p.keeper().known() == []  # read, and the setting holds it no more: let go
+
+
+def test_only_the_serving_platform_settles(made, env, tmp_path):
+    """Its own command line (unattached) and a one-shot platform command run from a shell whose setting may lack
+    EC2_DDNS_HOSTS: with the setting emptied, the keeper's own host is kept in ddns.json. Under the serving platform, the
+    same refresh lets it go."""
+    env(settings_of(EC2_REGIONS="us-east-1", EC2_DDNS_HOSTS="nas.example.com"))
+    p, fake = made()
+    p.ddns_update(force=False)  # unattached (the command line): made, its own
+    keeper = p.keeper()
+    assert keeper.own("nas.example.com") == HOME
+    env({"EC2_DDNS_HOSTS": ""})  # a shell whose setting lacks the hosts
+    p.settings_changed()
+    p.refresh()  # unattached: the zones read, nothing settled
+    assert keeper.own("nas.example.com") == HOME
+    serving(p, OneShotPlatform())
+    p.refresh()  # a one-shot platform command: nothing settled either
+    assert keeper.own("nas.example.com") == HOME
+    assert json.loads((tmp_path / "ec2" / "ddns.json").read_text(encoding="utf-8"))["own"] == {"nas.example.com": HOME}
+    serving(p)
+    p.refresh()  # the serving platform: let go
+    assert keeper.known() == [] and json.loads((tmp_path / "ec2" / "ddns.json").read_text(encoding="utf-8"))["own"] == {}

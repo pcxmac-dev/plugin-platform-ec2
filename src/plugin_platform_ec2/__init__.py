@@ -868,7 +868,11 @@ class Ec2Plugin(MachinePlugin):
     def _settle(self, cfg: Config) -> list[str]:
         """Every host the keeper holds (its own, or taken over: in its ddns.json too, so a change made while the plugin
         did not run counts) that EC2_DDNS_HOSTS no longer names is let go (Keeper.settle, liminal-libs 1.49.7): asked with
-        the whole setting, and only once the account's zones are read, never with a list cut short by unread zones."""
+        the whole setting, and only once the account's zones are read, never with a list cut short by unread zones. Only
+        the serving platform settles (`reading`): the plugin's own command line, or a one-shot command, runs from a shell
+        whose setting may lack EC2_DDNS_HOSTS, and must never empty the shared ddns.json."""
+        if not self.reading:
+            return []
         with self._rt.lock:
             read = self._rt.zones is not None
         if not read:
