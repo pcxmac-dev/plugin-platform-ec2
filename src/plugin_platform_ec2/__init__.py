@@ -44,7 +44,7 @@ from .route53 import ChangeInfo, RecordSet, Route53Api, Zone
 from .settings import ACCESS_KEY, DDNS_HOSTS, IAM_CONSOLE, KEYS, NAMES, REGIONS, SECRET_KEY, Config
 from .sigv4 import Signer
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"
 REFRESH_S = 900.0  # the account read again at most this often while attached (or by Refresh)
 REGIONS_S = 86400.0  # the regions enabled for the account asked again after a day
 CONFIG_S = 30.0  # the settings asked of the login again after this long
@@ -219,6 +219,7 @@ class Ec2Plugin(MachinePlugin):
     api = "2.2"
     order = 763
     ICON = "ec2"  # the EC2 mark (liminal-libs 1.49.0's icons.js)
+    SECTION = "cloud"  # drawn under the platform's Cloud plugins (liminal-libs 1.51.0, liminal-platform 0.25.0)
     HOOKS = (*MachinePlugin.HOOKS, "refresh", "regions", "servers", "firewalls", "key_pairs", "domains", "records", "power",
              "authorize_ingress", "revoke_ingress", "import_key", "delete_key", "set_record", "remove_record", "change",
              "ddns_update", "ddns_take_over")
