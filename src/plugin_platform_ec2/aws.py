@@ -141,8 +141,13 @@ def https(method: str, url: str, headers: Mapping[str, str], body: bytes | None,
     """The requests package over HTTPS (redirects not followed): (status, headers, body)."""
     import requests
 
-    resp = requests.request(method, url, headers=dict(headers), data=body, timeout=timeout, allow_redirects=False)
-    return resp.status_code, dict(resp.headers), resp.content
+    with requests.Session() as session:
+        # nothing taken from the environment (0.1.4; the review of 2026-11-21, item 26), as the library's own transport
+        # does since 1.49.6: a ~/.netrc entry replaced the SigV4 signature with its Basic credentials, sent to AWS, and
+        # a proxy or CA bundle from the variables saw the request and its session token
+        session.trust_env = False
+        resp = session.request(method, url, headers=dict(headers), data=body, timeout=timeout, allow_redirects=False)
+        return resp.status_code, dict(resp.headers), resp.content
 
 
 class AwsClient(RestClient):

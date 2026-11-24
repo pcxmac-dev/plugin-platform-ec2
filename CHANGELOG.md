@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.4 (2026-11-24)
+
+The review of 2026-11-21 (Monday list item 26), a P1: EC2's requests take nothing from the environment (`aws.https` with `trust_env` off, as the library's own
+transport since 1.49.6). A ~/.netrc entry (`default`, or one for amazonaws.com) replaced the SigV4 signature with its
+Basic credentials, sent to AWS; a proxy or a CA bundle named in the variables saw each request and its session token.
+
 ## 0.1.3 (2026-11-14)
 
 Drawn under the platform's Cloud plugins section, in the list on the left (the user: "classify the cloud plugins under the 'cloud plugins' section which should be on the far left"): `SECTION = "cloud"`. That is liminal-libs
