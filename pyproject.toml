@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "plugin-platform-ec2"
-version = "0.1.4"  # the plugin's own release (CHANGELOG.md); the platform shows it on the plugin's page
+version = "0.1.5"  # the plugin's own release (CHANGELOG.md); the platform shows it on the plugin's page
 description = "Amazon EC2 for Liminal's platform: your instances, security groups, key pairs, volumes and Elastic IPs in each region and your Route 53 zones, the free changes alone (power, records, inbound rules, keys), and Dynamic DNS through Route 53."
 readme = "README.md"
 requires-python = ">=3.10"

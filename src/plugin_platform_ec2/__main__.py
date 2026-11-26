@@ -16,7 +16,9 @@ EnvironmentLogin: EC2_* as this shell has them; never AWS_*).
     remove ZONE NAME TYPE VALUE              a value taken out of a record set (the set deleted with its last)
     change ID                                a Route 53 change's state (PENDING, INSYNC)
 
-A change asks "yes" on the terminal first, and once more for a risky one. --json prints the answer as JSON."""
+A change asks "yes" on the terminal first, and once more for a risky one. --json prints the answer as JSON. The platform
+asks the plugin's changes only from its page (PAGE_ONLY_HOOKS, 0.1.5); this command line asks the platform nothing: it
+calls the same code in its own process, with this shell's settings, as before."""
 from __future__ import annotations
 
 import argparse

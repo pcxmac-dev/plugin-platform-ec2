@@ -206,6 +206,15 @@ while it ran (the requests made, the last answer, the account, the regions) is i
 `power` takes `accept_costs=False` after `accept_data_loss` too. A refusal names the argument that accepts it
 (`Refusal.accept`), which the page asks as its second confirmation.
 
+**The changes are asked only from the plugin's page** (`PAGE_ONLY_HOOKS`, 0.1.5): `power`, `authorize_ingress`,
+`revoke_ingress`, `import_key`, `delete_key`, `set_record`, `remove_record`, `ddns_update` and `ddns_take_over`.
+Another plugin's ask of one is refused, and over HTTP the platform refuses one unless its login shows that you are at
+the page (liminal-libs 1.66.0 and liminal-platform 0.34.0 read the word; what is older than those asks them as before).
+`present`, `status`, `refresh()`, the reads and `change(id)` are asked by anyone. The plugin's own background (its reads,
+its Dynamic DNS passes) and its command line call the code themselves: they are not asks. The platform's check rests
+on its login's word that your browser is signed in, and a local login signs `secret` and `default` in with no
+password: it does not stop a program on this PC that signs itself in.
+
 ## From the command line
 
 Its settings read from the environment (as this shell has them):

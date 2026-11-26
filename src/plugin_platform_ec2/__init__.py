@@ -17,6 +17,13 @@ EC2_SECRET_ACCESS_KEY, EC2_SESSION_TOKEN, EC2_REGIONS, EC2_DDNS_HOSTS, EC2_DDNS_
 attached to the platform it reads the account every quarter of an hour and checks the Dynamic DNS hosts every few minutes
 in a thread of its own; detached, nothing of it runs. Its status is what was read last (no request answers it).
 
+Who may ask its changes (0.1.5; the independent review's PLT-H1 and the sweep of the plugins after it, 2026-11-25): an
+instance's power, an inbound rule authorized or revoked, a key pair imported or deleted, a Route 53 value set or removed, a
+Dynamic DNS pass and a host taken over are asked only from its page (PAGE_ONLY_HOOKS): another plugin's ask is refused, and
+the platform asks its login whether you are at the page. Before, any program on this PC could ask them of the platform with
+a header anyone can send, and the access key did the rest; a second confirmation is an argument the asker sets. Its reads
+are asked by anyone. The background and the command line call the same code themselves: those are not asks.
+
     python -m plugin_platform_ec2 status | regions | servers | firewalls | keys | domains | records ZONE | ddns [--now]
         | power INSTANCE start|stop|reboot [--force] | set ZONE NAME TYPE VALUE [--ttl N] [--add] | remove ZONE NAME TYPE VALUE
         | change ID
@@ -44,7 +51,7 @@ from .route53 import ChangeInfo, RecordSet, Route53Api, Zone
 from .settings import ACCESS_KEY, DDNS_HOSTS, IAM_CONSOLE, KEYS, NAMES, REGIONS, SECRET_KEY, Config
 from .sigv4 import Signer
 
-__version__ = "0.1.4"
+__version__ = "0.1.5"
 REFRESH_S = 900.0  # the account read again at most this often while attached (or by Refresh)
 REGIONS_S = 86400.0  # the regions enabled for the account asked again after a day
 CONFIG_S = 30.0  # the settings asked of the login again after this long
@@ -223,6 +230,15 @@ class Ec2Plugin(MachinePlugin):
     HOOKS = (*MachinePlugin.HOOKS, "refresh", "regions", "servers", "firewalls", "key_pairs", "domains", "records", "power",
              "authorize_ingress", "revoke_ingress", "import_key", "delete_key", "set_record", "remove_record", "change",
              "ddns_update", "ddns_take_over")
+    # Its changes, asked only from its page (0.1.5, the sweep after the review's PLT-H1; liminal-libs 1.66.0's
+    # apps/asking.py): another plugin's ask is refused (403), and liminal-platform 0.34.0 refuses one over HTTP (401) unless
+    # its login shows that you are at the page. Before, any program on this PC could ask them of the platform with a header
+    # anyone can send, the page's dialogs being the only confirmation (a second one, accept_costs or accept_open, is an
+    # argument the asker sets): an instance started and billing again, a record replaced, SSH opened to the whole internet,
+    # with your access key. The background's reads and Dynamic DNS passes and the command line call the code directly, not
+    # through an ask; its reads (refresh, the lists and a change's state among them) are asked by anyone.
+    PAGE_ONLY_HOOKS = ("power", "authorize_ingress", "revoke_ingress", "import_key", "delete_key", "set_record",
+                       "remove_record", "ddns_update", "ddns_take_over")
     keys = KEYS
     signup = IAM_CONSOLE
     limits = ("EC2: per account and region, a describe 100 at once and 20 a second, a change 50 and 5 (StartInstances 5 and "
