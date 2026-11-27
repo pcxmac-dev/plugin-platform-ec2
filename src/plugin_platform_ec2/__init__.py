@@ -22,7 +22,7 @@ instance's power, an inbound rule authorized or revoked, a key pair imported or 
 Dynamic DNS pass and a host taken over are asked only from its page (PAGE_ONLY_HOOKS): another plugin's ask is refused, and
 the platform asks its login whether you are at the page. Before, any program on this PC could ask them of the platform with
 a header anyone can send, and the access key did the rest; a second confirmation is an argument the asker sets. Its reads
-are asked by anyone. The background and the command line call the same code themselves: those are not asks.
+are asked only from its page too since 0.1.6 (`present` and `status` by anyone). The background and the command line call the same code themselves: those are not asks.
 
     python -m plugin_platform_ec2 status | regions | servers | firewalls | keys | domains | records ZONE | ddns [--now]
         | power INSTANCE start|stop|reboot [--force] | set ZONE NAME TYPE VALUE [--ttl N] [--add] | remove ZONE NAME TYPE VALUE
@@ -51,7 +51,7 @@ from .route53 import ChangeInfo, RecordSet, Route53Api, Zone
 from .settings import ACCESS_KEY, DDNS_HOSTS, IAM_CONSOLE, KEYS, NAMES, REGIONS, SECRET_KEY, Config
 from .sigv4 import Signer
 
-__version__ = "0.1.5"
+__version__ = "0.1.6"
 REFRESH_S = 900.0  # the account read again at most this often while attached (or by Refresh)
 REGIONS_S = 86400.0  # the regions enabled for the account asked again after a day
 CONFIG_S = 30.0  # the settings asked of the login again after this long
@@ -236,9 +236,16 @@ class Ec2Plugin(MachinePlugin):
     # anyone can send, the page's dialogs being the only confirmation (a second one, accept_costs or accept_open, is an
     # argument the asker sets): an instance started and billing again, a record replaced, SSH opened to the whole internet,
     # with your access key. The background's reads and Dynamic DNS passes and the command line call the code directly, not
-    # through an ask; its reads (refresh, the lists and a change's state among them) are asked by anyone.
+    # through an ask; its reads (refresh, the lists and a change's state among them) are asked only from its page too since 0.1.6 (`present` and `status` by anyone).
     PAGE_ONLY_HOOKS = ("power", "authorize_ingress", "revoke_ingress", "import_key", "delete_key", "set_record",
                        "remove_record", "ddns_update", "ddns_take_over")
+    # Its reads made with the account's key, asked only from its page too (0.1.6; liminal-libs 1.107.0 closes
+    # every hook a plugin declares for no one, and the user, 2026-11-26, chose "Page-only" for these): each sends
+    # requests as you and returns what the account holds, so another plugin's ask and an ask that names no one are
+    # refused, and the platform asks its login whether you are at the page. `present` and `status` stay anyone's
+    # (MachinePlugin's reads).
+    PAGE_ONLY_HOOKS = (*PAGE_ONLY_HOOKS, "refresh", "regions", "servers", "firewalls", "key_pairs", "domains",
+                       "records", "change")
     keys = KEYS
     signup = IAM_CONSOLE
     limits = ("EC2: per account and region, a describe 100 at once and 20 a second, a change 50 and 5 (StartInstances 5 and "

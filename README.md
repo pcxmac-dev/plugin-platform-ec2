@@ -210,7 +210,7 @@ while it ran (the requests made, the last answer, the account, the regions) is i
 `revoke_ingress`, `import_key`, `delete_key`, `set_record`, `remove_record`, `ddns_update` and `ddns_take_over`.
 Another plugin's ask of one is refused, and over HTTP the platform refuses one unless its login shows that you are at
 the page (liminal-libs 1.66.0 and liminal-platform 0.34.0 read the word; what is older than those asks them as before).
-`present`, `status`, `refresh()`, the reads and `change(id)` are asked by anyone. The plugin's own background (its reads,
+`present` and `status` are asked by anyone. From 0.1.6 `refresh()` and every other read is asked only from the page too (`refresh`, `regions`, `servers`, `firewalls`, `key_pairs`, `domains`, `records`, `change`): each is made with the account's key. The plugin's own background (its reads,
 its Dynamic DNS passes) and its command line call the code themselves: they are not asks. The platform's check rests
 on its login's word that your browser is signed in, and a local login signs `secret` and `default` in with no
 password: it does not stop a program on this PC that signs itself in.

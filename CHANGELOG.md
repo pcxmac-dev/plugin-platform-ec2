@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.1.6 (2026-11-26)
+
+Its reads made with the account's key are asked only from the page too. The user, 2026-11-26: "Yes, closed by
+default" (liminal-libs 1.107.0: a hook a plugin declares for no one is its page's alone), and of these reads:
+"Page-only".
+
+- **What only the page asks now, beside its changes**: `refresh`, `regions`, `servers`, `firewalls`, `key_pairs`, `domains`, `records`, `change`.
+  Each sends requests to the provider as you and returns what the account holds. Until now any plugin, and any program
+  on this machine through the platform, could ask them. Another plugin's ask and an ask that names no one are refused
+  (403) in words, and liminal-platform asks its login whether you are at the page (401 otherwise).
+- `present` and `status` stay reads anyone here may ask: the status is what was read last, and no request is made to
+  answer it. The background's reads and the command line call the code themselves: those are not asks.
+- Every hook now says who may ask it, so the library's `conformance.warnings` is empty.
+
+Tests: "its reads by anyone" became "its reads by the page alone": each read refused to another plugin and to no one,
+nothing sent for it, and answered for the page; a test that no hook is left undeclared. They fail when a read is taken
+out of `PAGE_ONLY_HOOKS`, on liminal-libs 1.106.0 and on 1.107.0 alike. No new requirement: the word is liminal-libs
+1.66.0's.
+
 ## 0.1.5 (2026-11-25)
 
 Its changes are asked only from the page (`PAGE_ONLY_HOOKS`, liminal-libs 1.66.0's word): the independent review's
